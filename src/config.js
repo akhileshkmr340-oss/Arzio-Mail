@@ -5,7 +5,19 @@ import path from 'node:path';
 const env = process.env;
 const bool = (v, d = false) => (v === undefined ? d : /^(1|true|yes|on)$/i.test(v));
 
+// Public demo mode: no mail leaves or enters the server from the internet,
+// only the web app runs, and a shared demo account with sample data is made.
+export const demo = /^(1|true|yes|on)$/i.test(env.ARZIO_DEMO || '');
+if (demo) {
+  env.OUTBOUND_TRANSPORT = 'log';
+  env.INBOUND_SMTP_ENABLED = 'false';
+  env.IMAP_ENABLED = 'false';
+  env.SUBMISSION_ENABLED = 'false';
+  env.ARZIO_BILLING = 'off';
+}
+
 export const config = {
+  demo: demo ? { user: (env.ARZIO_DEMO_USER || 'demo').toLowerCase(), password: env.ARZIO_DEMO_PASSWORD || 'ArzioDemo2026' } : null,
   // Public service identity
   serviceName: env.ARZIO_SERVICE_NAME || 'Arzio Mail',
   // Domain users sign up under, e.g. arzio.com -> alice@arzio.com

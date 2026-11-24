@@ -321,3 +321,6 @@ legend { color: var(--muted); padding: 0 4px; }
 .plan ul { margin: 6px 0; padding-left: 18px; flex: 1; }
 .plan .btn, .plan .tag { align-self: flex-start; }
 .row.interval { gap: 16px; }
+.demo-note { background: var(--brand-light, #e8f1fb); border: 1px solid var(--brand, #0f6cbd); border-radius: 8px; padding: 10px 12px; margin: 0 0 14px; font-size: 13px; line-height: 1.5; }
+.demo-note code { font-size: 12px; }
+.demo-note .btn { margin-top: 8px; display: block; }

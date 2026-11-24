@@ -17,6 +17,7 @@ import { startInboundSmtp } from './mail/smtp-inbound.js';
 import { aiInfo } from './ai/index.js';
 import { startWorkers } from './mail/delivery.js';
 import { startMaintenance } from './maintenance.js';
+import { seedDemo, demoGuard } from './demo.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 ensurePublicTenant(config.primaryDomain, config.serviceName);
@@ -51,6 +52,7 @@ app.use('/dav', dav);
 app.use(eas);
 app.use('/mcp', mcpRouter);
 app.use('/api', express.json({ limit: Math.ceil((config.quotas.maxMessageBytes * 1.4) / 1024 / 1024) + 'mb' }));
+app.use('/api', demoGuard);
 app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
 
@@ -74,6 +76,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (config.inbound.smtpEnabled) servers.push(['smtp', startInboundSmtp()]);
   if (config.imap.enabled) servers.push(['imap', startImap()]);
   if (config.submission.enabled) servers.push(['submission', startSubmission()]);
+  if (config.demo) seedDemo().catch((e) => console.error('[demo] seeding failed', e));
   const timers = [startWorkers(), startMaintenance()];
 
   // Graceful shutdown: stop taking new connections, let open requests finish,

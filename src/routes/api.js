@@ -36,7 +36,8 @@ setInterval(() => { const now = Date.now(); for (const [k, b] of buckets) if (no
 
 // ------------------------------------------------------------ service + auth
 api.get('/service', (req, res) => {
-  res.json({ name: config.serviceName, domain: config.primaryDomain, signupOpen: config.signup.open, ai: ai.aiInfo(), billing: billing.billingConfig.enabled });
+  res.json({ name: config.serviceName, domain: config.primaryDomain, signupOpen: config.signup.open, ai: ai.aiInfo(), billing: billing.billingConfig.enabled,
+    ...(config.demo ? { demo: { email: `${config.demo.user}@${config.primaryDomain}`, password: config.demo.password } } : {}) });
 });
 
 api.post('/auth/signup', wrap(async (req, res) => {

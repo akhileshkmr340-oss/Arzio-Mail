@@ -122,6 +122,12 @@ async function boot() {
   $$('.service-name').forEach((el) => { el.textContent = state.service.name; });
   document.title = state.service.name;
   $('.addr-domain').textContent = `@${state.service.domain}`;
+  if (state.service.demo) {
+    const d = state.service.demo, note = $('#demo-note');
+    note.innerHTML = `<b>Demo.</b> Sign in as <code>${esc(d.email)}</code> with password <code>${esc(d.password)}</code>, or create your own address. Mail stays inside the demo. <button type="button" class="btn small" id="demo-fill">Use demo account</button>`;
+    note.classList.remove('hidden');
+    $('#demo-fill').addEventListener('click', () => { const f = $('#login-form'); f.email.value = d.email; f.password.value = d.password; f.requestSubmit(); });
+  }
   const ai = state.service.ai || {};
   $('#ai-badge').textContent = ai.provider === 'anthropic' ? '✨ AI: Claude' : '✨ AI: basic';
   try { await startApp(); } catch { showAuth(); }

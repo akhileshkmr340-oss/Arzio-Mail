@@ -1,0 +1,21 @@
+# One-click public demo on Render's free plan:
+# https://render.com/deploy?repo=https://github.com/akhileshkmr340-oss/Arzio-Mail
+# Demo mode sends no mail to the internet and seeds a shared demo account.
+# The free plan has no disk, so the demo resets whenever the service restarts.
+services:
+  - type: web
+    name: arzio-mail-demo
+    runtime: docker
+    plan: free
+    healthCheckPath: /ready
+    envVars:
+      - key: ARZIO_DEMO
+        value: "true"
+      - key: ARZIO_DOMAIN
+        value: arzio.demo
+      - key: SECURE_COOKIES
+        value: "true"
+      - key: TRUST_PROXY
+        value: "true"
+      - key: ANTHROPIC_API_KEY
+        sync: false

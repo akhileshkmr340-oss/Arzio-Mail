@@ -145,3 +145,19 @@ Keep `.env` out of git. It holds your relay password and AI key.
 - Add it to a desktop mail app over IMAP with the settings on the same page.
 - Run a backup by hand and restore it onto a test machine once
   ([OPERATIONS.md](OPERATIONS.md#restore)).
+
+## Public demo (no domain needed)
+
+`ARZIO_DEMO=true` runs a safe demo: no mail goes to or comes from the internet,
+only the web app runs, and a shared account `demo@<domain>` (password
+`ArzioDemo2026`, change with `ARZIO_DEMO_PASSWORD`) is filled with sample mail,
+a meeting invitation, events and tasks. Visitors can also sign up for their own
+address. Password, two-step, delegate, token and admin changes are blocked on
+the shared account.
+
+On Render's free plan: open
+`https://render.com/deploy?repo=https://github.com/akhileshkmr340-oss/Arzio-Mail`,
+sign in with GitHub and press Apply. `render.yaml` sets everything. Add an
+`ANTHROPIC_API_KEY` there for real AI; without it the built-in basic AI is used.
+The free plan sleeps after 15 minutes idle (the first visit then takes about a
+minute) and the demo resets on every restart.
