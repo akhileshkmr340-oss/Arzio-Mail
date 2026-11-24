@@ -1,5 +1,6 @@
 // Calendar, To Do, notifications, app passwords and API tokens.
 import express from 'express';
+import { useAi } from '../billing.js';
 import crypto from 'node:crypto';
 import { db } from '../db.js';
 import { config } from '../config.js';
@@ -94,7 +95,7 @@ calendar.post('/calendar/feed', (req, res) => {
 
 // AI meeting prep: related mail, open questions
 calendar.post('/calendar/events/:id/brief', wrap(async (req, res) => {
-  if (!req.user.ai_enabled) throw httpError(403, 'AI features are turned off in your settings.');
+  if (!req.user.ai_enabled) throw httpError(403, 'AI features are turned off in your settings.'); useAi(req.user);
   const e = cal.getEvent(req.user.id, req.params.id);
   if (!e) throw httpError(404, 'Event not found.');
   const people = e.attendees.map((a) => a.email).concat(e.organizer_email).filter((x) => x && x !== req.user.email);

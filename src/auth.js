@@ -1,5 +1,6 @@
 // Accounts and sessions: scrypt password hashing, random session tokens in an
 // HttpOnly cookie.
+import { seatLimit } from './billing.js';
 import crypto from 'node:crypto';
 import { db, SYSTEM_FOLDERS, tx, ensurePublicTenant } from './db.js';
 import { config } from './config.js';
@@ -59,9 +60,10 @@ export function createUser({ username, name, password, ip, orgId, domain, role =
     dom = db.prepare('SELECT * FROM domains WHERE name = ? AND org_id = ?').get(String(domain || '').toLowerCase(), orgId);
     if (!org || !dom) throw httpError(400, 'That domain does not belong to this organization.');
     if (!dom.verified && !allowUnverified) throw httpError(400, 'Verify the domain before adding users to it.');
-    if (org.kind === 'private' && org.max_users > 0) {
-      const n = db.prepare('SELECT COUNT(*) AS n FROM users WHERE org_id = ?').get(org.id).n;
-      if (n >= org.max_users) throw httpError(400, `This organization has reached its limit of ${org.max_users} users.`);
+    const seats = org.kind === 'private' ? seatLimit(org.id, org.max_users) : 0;
+    if (org.kind === 'private' && seats > 0) {
+      const n = db.prepare("SELECT COUNT(*) AS n FROM users WHERE org_id = ? AND mailbox_type != 'shared'").get(org.id).n;
+      if (n >= seats) throw httpError(400, `This organization has reached its limit of ${seats} users. Add seats in Admin center > Billing.`);
     }
   } else {
     org = ensurePublicTenant(config.primaryDomain, config.serviceName);

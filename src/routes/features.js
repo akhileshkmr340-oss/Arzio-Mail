@@ -1,6 +1,7 @@
 // Phase 2+ user features: preferences, two-step verification, rules, templates,
 // contacts, sender lists, sweep, scheduled/undo send, aliases, delegation, AI coaching and Q&A.
 import express from 'express';
+import { useAi } from '../billing.js';
 import QRCode from 'qrcode';
 import { config } from '../config.js';
 import { db } from '../db.js';
@@ -227,12 +228,12 @@ features.delete('/me/delegates/:id', (req, res) => {
 
 // ------------------------------------------------------------ AI: coaching and ask your mailbox
 features.post('/ai/coach', wrap(async (req, res) => {
-  if (!req.user.ai_enabled) throw httpError(403, 'AI features are turned off in your settings.');
+  if (!req.user.ai_enabled) throw httpError(403, 'AI features are turned off in your settings.'); useAi(req.user);
   res.json(await ai.coach({ text: req.body?.text || '', recipients: req.body?.recipients }));
 }));
 
 features.post('/ai/ask', wrap(async (req, res) => {
-  if (!req.user.ai_enabled) throw httpError(403, 'AI features are turned off in your settings.');
+  if (!req.user.ai_enabled) throw httpError(403, 'AI features are turned off in your settings.'); useAi(req.user);
   const question = String(req.body?.question || '').trim();
   if (!question) throw httpError(400, 'Ask a question.');
   const sources = store.searchForQuestion(req.mbx, question, 12);

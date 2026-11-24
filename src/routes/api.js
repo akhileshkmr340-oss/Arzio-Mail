@@ -1,5 +1,6 @@
 // REST API used by the web client (and future mobile apps / integrations).
 import express from 'express';
+import * as billing from '../billing.js';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
@@ -16,6 +17,7 @@ import { audit } from '../audit.js';
 import { features } from './features.js';
 import { calendar, calendarPublic } from './calendar.js';
 import { admin } from './admin.js';
+import { billingRoutes } from './billing.js';
 
 export const api = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -34,7 +36,7 @@ setInterval(() => { const now = Date.now(); for (const [k, b] of buckets) if (no
 
 // ------------------------------------------------------------ service + auth
 api.get('/service', (req, res) => {
-  res.json({ name: config.serviceName, domain: config.primaryDomain, signupOpen: config.signup.open, ai: ai.aiInfo() });
+  res.json({ name: config.serviceName, domain: config.primaryDomain, signupOpen: config.signup.open, ai: ai.aiInfo(), billing: billing.billingConfig.enabled });
 });
 
 api.post('/auth/signup', wrap(async (req, res) => {
@@ -112,7 +114,7 @@ api.use((req, res, next) => {
 });
 
 api.get('/me', (req, res) => {
-  res.json({ user: req.user, usage: { bytes: store.mailboxUsage(req.user.id), quota: config.quotas.mailboxBytes } });
+  res.json({ user: req.user, usage: { bytes: store.mailboxUsage(req.user.id), quota: billing.storageLimit(req.user.id) }, plan: billing.limitsFor(req.user).plan || null });
 });
 
 api.patch('/me', wrap(async (req, res) => {
@@ -219,6 +221,7 @@ api.post('/drafts', wrap(async (req, res) => {
 function requireAi(req) {
   if (!req.user.ai_enabled) throw httpError(403, 'AI features are turned off in your settings.');
   rateLimit(`ai:${req.user.id}`, 60, 3600e3);
+  billing.useAi(req.user);
 }
 
 api.post('/ai/summarize', wrap(async (req, res) => {
@@ -260,6 +263,7 @@ api.post('/ai/triage', wrap(async (req, res) => {
 api.use(features);
 api.use(calendar);
 api.use(admin);
+api.use(billingRoutes);
 
 // ------------------------------------------------------------ organization admin (private tenants)
 function orgIdFor(req) {
@@ -309,7 +313,7 @@ api.get('/org/domains', requireOrgAdmin, (req, res) => {
   res.json({ domains: domains.map(dnsInstructions) });
 });
 
-api.post('/org/domains', requireOrgAdmin, wrap(async (req, res) => {
+api.post('/org/domains', requireOrgAdmin, billing.requireFeature('custom_domain', 'Your own domain'), wrap(async (req, res) => {
   const name = String(req.body?.name || '').trim().toLowerCase();
   if (!/^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(name)) throw httpError(400, 'Enter a valid domain such as example.com.');
   if (db.prepare('SELECT 1 FROM domains WHERE name = ?').get(name)) throw httpError(409, 'That domain is already registered.');

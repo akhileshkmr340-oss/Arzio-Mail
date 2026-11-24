@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import { simpleParser } from 'mailparser';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import addressparser from 'nodemailer/lib/addressparser/index.js';
+import { storageLimit } from '../billing.js';
 import { config } from '../config.js';
 import { db } from '../db.js';
 import { clientLogin } from '../auth.js';
@@ -552,7 +553,7 @@ const COMMANDS = {
     const lit = args[i];
     if (!lit?.lit) throw err('BAD', 'Message literal missing');
     const raw = lit.str;
-    if (store.mailboxUsage(this.user.id) + raw.length > config.quotas.mailboxBytes) throw err('NO', '[OVERQUOTA] Mailbox is full');
+    if (store.mailboxUsage(this.user.id) + raw.length > storageLimit(this.user.id)) throw err('NO', '[OVERQUOTA] Mailbox is full');
     const parsed = await simpleParser(raw);
     const list = (v) => (v ? (Array.isArray(v) ? v : [v]).flatMap((x) => x.value || []) : []).map((a) => ({ address: String(a.address || '').toLowerCase(), name: a.name || '' })).filter((a) => a.address);
     const id = store.storeMessage(this.user.id, {

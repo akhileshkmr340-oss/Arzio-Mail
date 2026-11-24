@@ -26,6 +26,7 @@ It has built-in AI (Claude by default): thread summaries with action items, repl
 | Admin center | Users, shared mailboxes (support@, info@), groups / distribution lists, domains, mail flow rules with data loss prevention (card, Aadhaar, PAN, IBAN, SSN), message trace, audit log, usage reports |
 | Compliance | Retention policies, litigation hold (deleted mail kept hidden), eDiscovery search across all mailboxes with .mbox export |
 | Migration | Import from Gmail, Outlook / Microsoft 365, Yahoo, Zoho or any IMAP account in the background; .mbox (Google Takeout) and .eml upload |
+| Plans and billing | Free and Premium plans for personal accounts, per-user Business Basic and Standard plans for organizations; storage, sending, AI and feature limits per plan; Razorpay (UPI, cards) and Stripe checkout, GST invoices, cancel and seat changes, manual plans for bank transfers; revenue view for the operator ([docs/BILLING.md](docs/BILLING.md)) |
 | Operations | `/health`, `/ready` and Prometheus `/metrics`; graceful shutdown; live backups with rotation and a checked restore; Docker, nginx and systemd kit |
 | Security | scrypt passwords, two-step verification (authenticator apps), HttpOnly sessions, rate limits, SPF/DKIM/DMARC checks and spam scoring on inbound mail, sandboxed HTML mail, CSP, audit log |
 
@@ -54,7 +55,7 @@ Create a service admin (can create private organizations):
 npm run create-admin -- admin 'a-strong-password' "Arzio Admin"
 ```
 
-Run the tests: `npm test` (32 tests).
+Run the tests: `npm test` (37 tests).
 
 ### Connecting a mail app
 
@@ -91,6 +92,7 @@ src/
   db.js                  SQLite schema and upgrades
   auth.js                accounts, passwords, sessions, app passwords, API tokens
   health.js              /health, /ready, /metrics
+  billing.js             plans, limits, Stripe and Razorpay, invoices
   dav.js                 CalDAV and CardDAV
   mcp.js                 MCP server for AI agents
   audit.js, mfa.js, maintenance.js
@@ -110,8 +112,8 @@ src/
 public/                  web app (PWA)
 scripts/                 create-admin, backup, restore
 deploy/                  docker-compose, nginx, systemd, certificate hook
-docs/                    DEPLOY, OPERATIONS, API
-test/                    32 end-to-end tests
+docs/                    DEPLOY, OPERATIONS, API, BILLING
+test/                    37 end-to-end tests
 ```
 
 ## Known limits

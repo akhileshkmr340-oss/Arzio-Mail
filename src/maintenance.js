@@ -1,6 +1,7 @@
 // Hourly housekeeping: empty old Deleted Items, apply organization retention
 // policies (skipped under litigation hold), clear expired sessions and old queue rows.
 import { db } from './db.js';
+import { runBillingMaintenance } from './billing.js';
 import { purgeMessage } from './mail/store.js';
 
 function purge(rows) {
@@ -21,6 +22,7 @@ export function runMaintenance() {
   db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(new Date().toISOString());
   db.prepare("DELETE FROM delivery_queue WHERE status IN ('sent', 'failed') AND created_at < datetime('now', '-30 days')").run();
   db.prepare("DELETE FROM outbox WHERE status IN ('sent', 'cancelled', 'failed') AND created_at < datetime('now', '-30 days')").run();
+  runBillingMaintenance();
   return { purged };
 }
 

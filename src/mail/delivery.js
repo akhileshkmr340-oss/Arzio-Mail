@@ -7,6 +7,7 @@ import nodemailer from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { simpleParser } from 'mailparser';
 import { config, isLocalDomain } from '../config.js';
+import { storageLimit, sendLimit } from '../billing.js';
 import { db } from '../db.js';
 import { storeMessage, saveAi, mailboxUsage, getMessage, deleteMessage, folderByRole } from './store.js';
 import { resolveRecipient, checkInbound, senderListMatch, applyRules, shouldAutoReply, recordContacts, addressesOf } from './features.js';
@@ -72,7 +73,7 @@ export async function deliverRaw(raw, recipients, smtp = {}) {
   const delivered = [];
 
   for (const user of expandRecipients(recipients, from.address)) {
-    if (mailboxUsage(user.id) + raw.length > config.quotas.mailboxBytes) continue; // over quota
+    if (mailboxUsage(user.id) + raw.length > storageLimit(user.id)) continue; // over quota
     const full = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     const listKind = senderListMatch(user.id, from.address);
     const junk = listKind === 'blocked' || (listKind !== 'safe' && check.score >= 5);
@@ -285,7 +286,7 @@ export async function sendMail(user, input) {
   const all = [...parseRecipients(input.to), ...parseRecipients(input.cc), ...parseRecipients(input.bcc)];
   if (!all.length) throw httpErr(400, 'Add at least one recipient.');
   if (all.length > 100) throw httpErr(400, 'Too many recipients (max 100).');
-  if (sentToday(user.id) >= config.quotas.sendsPerUserPerDay) throw httpErr(429, 'Daily sending limit reached.');
+  if (sentToday(user.id) >= sendLimit(user.id)) throw httpErr(429, 'Daily sending limit reached for your plan.');
   if (input.from && !sendIdentities(user).some((i) => i.address === String(input.from).toLowerCase())) throw httpErr(403, 'You are not allowed to send from that address.');
 
   let sendAt;
@@ -445,7 +446,7 @@ export function startWorkers(intervalMs = 2000) {
  * The app saves its own copy in Sent over IMAP, so none is stored here.
  */
 export async function submitRaw(user, raw, envelope) {
-  if (sentToday(user.id) >= config.quotas.sendsPerUserPerDay) throw httpErr(429, 'Daily sending limit reached.');
+  if (sentToday(user.id) >= sendLimit(user.id)) throw httpErr(429, 'Daily sending limit reached for your plan.');
   const parsed = await simpleParser(raw);
   const from = addrList(parsed.from)[0]?.address || '';
   const allowed = new Set(sendIdentities(user).map((i) => i.address));

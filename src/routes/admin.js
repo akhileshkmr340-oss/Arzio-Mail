@@ -10,6 +10,7 @@ import { httpError, requireOrgAdmin, createUser } from '../auth.js';
 import { listTransportRules, SENSITIVE_TYPES } from '../mail/transport-rules.js';
 import { listAudit, audit } from '../audit.js';
 import * as store from '../mail/store.js';
+import { requireFeature, limitsFor } from '../billing.js';
 import { startImapImport, importFile, listJobs, PRESETS } from '../mail/import.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -38,7 +39,7 @@ admin.get('/org/shared-mailboxes', requireOrgAdmin, (req, res) => {
   res.json({ mailboxes: boxes });
 });
 
-admin.post('/org/shared-mailboxes', requireOrgAdmin, wrap(async (req, res) => {
+admin.post('/org/shared-mailboxes', requireOrgAdmin, requireFeature('shared_mailboxes', 'Shared mailboxes'), wrap(async (req, res) => {
   const orgId = orgIdFor(req);
   const b = req.body || {};
   // Shared mailboxes have no password of their own: members open them from their account
@@ -96,7 +97,7 @@ function saveGroup(orgId, b, existing) {
     return groupOut(db.prepare('SELECT * FROM groups WHERE id = ?').get(id));
   });
 }
-admin.post('/org/groups', requireOrgAdmin, wrap(async (req, res) => {
+admin.post('/org/groups', requireOrgAdmin, requireFeature('groups', 'Groups'), wrap(async (req, res) => {
   const g = saveGroup(orgIdFor(req), req.body || {});
   audit(req.user.id, 'admin.group.create', { group: g.address });
   res.status(201).json({ group: g });
@@ -140,14 +141,14 @@ function cleanRule(b) {
   if (b.action === 'disclaimer' && !value.trim()) throw httpError(400, 'Enter the disclaimer text.');
   return { name, match, action: b.action, value, enabled: b.enabled !== false };
 }
-admin.post('/org/transport-rules', requireOrgAdmin, wrap(async (req, res) => {
+admin.post('/org/transport-rules', requireOrgAdmin, requireFeature('compliance', 'Mail flow rules and data loss prevention'), wrap(async (req, res) => {
   const r = cleanRule(req.body || {});
   const id = db.prepare('INSERT INTO transport_rules (org_id, name, match_json, action, value, enabled) VALUES (?, ?, ?, ?, ?, ?)')
     .run(orgIdFor(req), r.name, JSON.stringify(r.match), r.action, r.value, r.enabled ? 1 : 0).lastInsertRowid;
   audit(req.user.id, 'admin.mailflow.create', { rule: r.name, action: r.action });
   res.status(201).json({ id: Number(id) });
 }));
-admin.put('/org/transport-rules/:id', requireOrgAdmin, wrap(async (req, res) => {
+admin.put('/org/transport-rules/:id', requireOrgAdmin, requireFeature('compliance', 'Mail flow rules and data loss prevention'), wrap(async (req, res) => {
   const r = cleanRule(req.body || {});
   const out = db.prepare('UPDATE transport_rules SET name = ?, match_json = ?, action = ?, value = ?, enabled = ? WHERE id = ? AND org_id = ?')
     .run(r.name, JSON.stringify(r.match), r.action, r.value, r.enabled ? 1 : 0, Number(req.params.id), orgIdFor(req));
@@ -188,7 +189,7 @@ admin.get('/org/compliance', requireOrgAdmin, (req, res) => {
   const o = db.prepare('SELECT retention_days, litigation_hold FROM organizations WHERE id = ?').get(orgIdFor(req));
   res.json({ retention_days: o.retention_days || 0, litigation_hold: !!o.litigation_hold });
 });
-admin.patch('/org/compliance', requireOrgAdmin, (req, res) => {
+admin.patch('/org/compliance', requireOrgAdmin, requireFeature('compliance', 'Retention and litigation hold'), (req, res) => {
   const orgId = orgIdFor(req);
   const b = req.body || {};
   if ('retention_days' in b) {
@@ -217,13 +218,13 @@ function discover(orgId, { q, from, to, mailbox }) {
   return db.prepare(`SELECT m.id, m.user_id, u.email AS mailbox, m.from_addr, m.subject, m.date, m.raw_path, m.folder_id,
       (SELECT role FROM folders WHERE id = m.folder_id) AS folder_role FROM ${src} WHERE ${where.join(' AND ')} ORDER BY m.date DESC LIMIT 5000`).all(...args);
 }
-admin.post('/org/ediscovery/search', requireOrgAdmin, wrap(async (req, res) => {
+admin.post('/org/ediscovery/search', requireOrgAdmin, requireFeature('compliance', 'eDiscovery'), wrap(async (req, res) => {
   const hits = discover(orgIdFor(req), req.body || {});
   audit(req.user.id, 'admin.ediscovery.search', { ...req.body, hits: hits.length });
   res.json({ count: hits.length, results: hits.slice(0, 200).map((h) => ({ id: h.id, mailbox: h.mailbox, from: h.from_addr, subject: h.subject, date: h.date, held: h.folder_role === 'recoverable', deleted: h.folder_role === 'trash' })) });
 }));
 // Export every match as one .mbox file
-admin.post('/org/ediscovery/export', requireOrgAdmin, wrap(async (req, res) => {
+admin.post('/org/ediscovery/export', requireOrgAdmin, requireFeature('compliance', 'eDiscovery'), wrap(async (req, res) => {
   const hits = discover(orgIdFor(req), req.body || {});
   audit(req.user.id, 'admin.ediscovery.export', { ...req.body, hits: hits.length });
   res.setHeader('Content-Type', 'application/mbox');
@@ -259,7 +260,7 @@ admin.get('/org/reports', requireOrgAdmin, (req, res) => {
     sent7d: count('mail.sent'), received7d: count('mail.received'), junk7d: db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE org_id = ? AND action = 'mail.received' AND details_json LIKE '%\"junk\":true%' AND created_at > datetime('now', '-7 days')").get(orgId).n,
     failed7d: db.prepare("SELECT COUNT(*) AS n FROM delivery_queue q JOIN users u ON u.id = q.user_id WHERE u.org_id = ? AND q.status = 'failed' AND q.created_at > datetime('now', '-7 days')").get(orgId).n,
     mfaUsers: users.filter((u) => u.totp_enabled && u.mailbox_type !== 'shared').length,
-    quotaBytes: config.quotas.mailboxBytes,
+    quotaBytes: limitsFor(req.user).storageBytes,
     users: users.map((u) => ({ ...u, is_disabled: !!u.is_disabled, totp_enabled: !!u.totp_enabled })),
   });
 });

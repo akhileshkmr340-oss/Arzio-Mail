@@ -310,3 +310,14 @@ legend { color: var(--muted); padding: 0 4px; }
 #admin-body th, #admin-body td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 #admin-body code { background: var(--bg); padding: 1px 4px; border-radius: 3px; }
 #admin-body form { max-width: 980px; }
+
+/* Plans and billing */
+.plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 12px 0; }
+.plan { border: 1px solid var(--border, #d0d7de); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 4px; background: var(--panel, #fff); }
+.plan.current { border-color: var(--accent, #0f6cbd); box-shadow: 0 0 0 1px var(--accent, #0f6cbd); }
+.plan h4 { margin: 0; font-size: 16px; }
+.plan .price { font-size: 22px; font-weight: 600; }
+.plan .price span { font-size: 13px; font-weight: 400; color: var(--muted, #666); }
+.plan ul { margin: 6px 0; padding-left: 18px; flex: 1; }
+.plan .btn, .plan .tag { align-self: flex-start; }
+.row.interval { gap: 16px; }

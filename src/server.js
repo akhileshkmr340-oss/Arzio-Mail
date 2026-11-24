@@ -8,6 +8,7 @@ import { api } from './routes/api.js';
 import { mcpRouter } from './mcp.js';
 import { dav, wellKnown } from './dav.js';
 import { health, markShuttingDown } from './health.js';
+import { webhooks } from './routes/billing.js';
 import { closeDb } from './db.js';
 import { startImap } from './mail/imap.js';
 import { startSubmission } from './mail/smtp-submission.js';
@@ -43,6 +44,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 app.use(health);
+app.use(webhooks);
 app.use(wellKnown);
 app.use('/dav', dav);
 app.use('/mcp', mcpRouter);

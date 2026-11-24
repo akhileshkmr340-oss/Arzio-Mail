@@ -46,7 +46,7 @@ function fmtDate(iso, long = false) {
   return d.toLocaleDateString([], { year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric', month: 'short', day: 'numeric' });
 }
 const initials = (name, email) => (name || email || '?').split(/[\s@.]+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('');
-const fmtBytes = (b) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : b > 1024 ? `${Math.round(b / 1024)} KB` : `${b} B`);
+const fmtBytes = (b) => (b >= 1073741824 ? `${+(b / 1073741824).toFixed(1)} GB` : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : b > 1024 ? `${Math.round(b / 1024)} KB` : `${b} B`);
 const people = (list) => (list || []).map((p) => p.name || p.address).join(', ');
 
 // ------------------------------------------------------------ auth screens
@@ -113,6 +113,8 @@ async function startApp() {
   const qp = new URLSearchParams(location.search);
   if (qp.get('compose')) openComposer('new');
   if (VIEWS[qp.get('view')]) showView(qp.get('view'));
+  if (qp.get('billing') === 'success') toast('Payment received. Your plan updates in a moment.');
+  if (qp.get('billing') === 'cancelled') toast('Payment cancelled. Your plan has not changed.');
 }
 
 async function boot() {
@@ -864,13 +866,14 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 // ------------------------------------------------------------ settings (tabbed)
 const SETTINGS_TABS = [
   ['general', 'General'], ['ooo', 'Automatic replies'], ['rules', 'Rules'], ['junk', 'Junk email'],
-  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Mail apps & AI agents'], ['import', 'Import mail'],
+  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Mail apps & AI agents'], ['import', 'Import mail'], ['billing', 'Plan & billing'],
 ];
 
 async function openSettings(tab = 'general', ruleSeed = null) {
   if (typeof tab !== 'string') tab = 'general';
   const u = state.me = (await api('/me')).user;
-  const m = modal(`<h2>Settings</h2><div class="tabbar">${SETTINGS_TABS.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? 'active' : ''}">${l}</button>`).join('')}</div><div id="settings-body"></div>`);
+  const tabs = SETTINGS_TABS.filter(([k]) => k !== 'billing' || (state.service?.billing && u.org_kind === 'public'));
+  const m = modal(`<h2>Settings</h2><div class="tabbar">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? 'active' : ''}">${l}</button>`).join('')}</div><div id="settings-body"></div>`);
   m.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => openSettings(b.dataset.tab); });
   const body = $('#settings-body', m);
   const footer = '<p class="form-error"></p><div class="actions"><button class="btn" type="button" data-close>Close</button><button class="btn primary">Save</button></div>';
@@ -1027,6 +1030,14 @@ async function openSettings(tab = 'general', ruleSeed = null) {
     const off = $('#mfa-off', body);
     if (off) off.onsubmit = async (e) => { e.preventDefault(); try { await api('/me/mfa/disable', { method: 'POST', body: { password: e.target.password.value } }); toast('Two-step verification is off.'); openSettings('security'); } catch (ex) { err.textContent = ex.message; } };
     $('#pw-form', body).onsubmit = async (e) => { e.preventDefault(); try { await api('/me', { method: 'PATCH', body: { currentPassword: e.target.currentPassword.value, newPassword: e.target.newPassword.value } }); toast('Password changed.'); e.target.reset(); } catch (ex) { err.textContent = ex.message; } };
+  }
+
+  if (tab === 'billing') {
+    const o = await api('/billing');
+    body.innerHTML = `${billingIntro(o)}${planCards(o, { business: false })}
+      ${o.subscription && !o.subscription.cancelAtPeriodEnd && o.subscription.provider !== 'manual' ? '<p><button class="link-btn" data-cancel-plan>Cancel plan</button></p>' : ''}
+      <h3>Invoices</h3>${invoiceTable(o.invoices)}<p class="form-error"></p>`;
+    wirePlans(body, o, { business: false, base: '/billing', onDone: () => openSettings('billing'), err: $('.form-error', body) });
   }
 
   if (tab === 'import') {
@@ -1206,7 +1217,7 @@ async function openServiceAdmin() {
     <h2>Service admin</h2>
     <h3>Organizations</h3>
     <table><thead><tr><th>Name</th><th>Type</th><th>Domains</th><th>Users</th></tr></thead><tbody>
-    ${orgs.map((o) => `<tr><td>${esc(o.name)}</td><td>${o.kind === 'public' ? 'Public (free signups)' : 'Private'}</td><td>${esc(o.domains || '')}</td><td>${o.users}</td></tr>`).join('')}
+    ${orgs.map((o) => `<tr><td>${esc(o.name)} <span class="muted small">#${o.id}</span></td><td>${o.kind === 'public' ? 'Public (free signups)' : 'Private'}</td><td>${esc(o.domains || '')}</td><td>${o.users}</td></tr>`).join('')}
     </tbody></table>
     <h3>Create a private organization</h3>
     <form id="new-org">
@@ -1224,6 +1235,46 @@ async function openServiceAdmin() {
       toast(`Created. Admin: ${r.admin.email}`); openServiceAdmin();
     } catch (ex) { $('.form-error', f).textContent = ex.message; }
   };
+  if (state.service?.billing) {
+    const b = await api('/admin/billing');
+    const box = document.createElement('div');
+    box.innerHTML = `<h3>Plans and revenue</h3>
+      <div class="stats"><div><b>${money(b.mrr, b.currency)}</b><span>monthly recurring revenue</span></div><div><b>${money(b.collected30d, b.currency)}</b><span>collected, last 30 days</span></div><div><b>${b.pastDue}</b><span>payments failing</span></div>
+      <div><b>${[b.providers.razorpay && 'Razorpay', b.providers.stripe && 'Stripe'].filter(Boolean).join(', ') || 'None'}</b><span>online payment</span></div></div>
+      <table><thead><tr><th>Plan</th><th>Monthly</th><th>Yearly</th><th>Storage (MB)</th><th>Emails/day</th><th>AI/day</th><th></th></tr></thead><tbody>
+      ${b.plans.map((p) => `<tr data-pc="${p.code}"><td>${esc(p.name)} <span class="muted small">${p.audience}</span></td>
+        <td><input name="price_month" type="number" value="${p.price_month / 100}" step="0.01" style="width:90px"></td><td><input name="price_year" type="number" value="${p.price_year / 100}" step="0.01" style="width:90px"></td>
+        <td><input name="storage_mb" type="number" value="${p.storage_mb}" style="width:90px"></td><td><input name="sends_per_day" type="number" value="${p.sends_per_day}" style="width:80px"></td>
+        <td><input name="ai_per_day" type="number" value="${p.ai_per_day}" style="width:70px" title="-1 = no limit, 0 = no AI"></td><td><button class="btn" data-save-plan>Save</button></td></tr>`).join('')}</tbody></table>
+      <p class="muted small">Prices are before ${'tax'}, in ${b.currency}. Subscribers keep their price until they change plan.</p>
+      <h4>Give a plan by hand (paid by invoice or a gift)</h4>
+      <form id="assign-plan" class="row"><label>Personal address or org id<input name="who" required placeholder="name@domain or 12"></label>
+        <label>Plan<select name="plan">${b.plans.map((p) => `<option value="${p.code}">${esc(p.name)}</option>`).join('')}</select></label>
+        <label>Seats<input name="seats" type="number" value="1" min="1" style="width:70px"></label><label>Months<input name="months" type="number" value="12" min="1" style="width:70px"></label>
+        <label class="check"><input type="checkbox" name="paid" checked> Paid (record invoice)</label><button class="btn">Assign</button></form>
+      <p class="form-error" id="ops-bill-err"></p>`;
+    const firstH = m.querySelector('h3'); firstH.parentNode.insertBefore(box, firstH);
+    const e2 = $('#ops-bill-err', box);
+    box.onclick = async (e) => {
+      const btn = e.target.closest('[data-save-plan]');
+      if (!btn) return;
+      const row = btn.closest('tr');
+      const v = (n) => Number($(`[name=${n}]`, row).value);
+      try {
+        await api(`/admin/plans/${row.dataset.pc}`, { method: 'PUT', body: { price_month: Math.round(v('price_month') * 100), price_year: Math.round(v('price_year') * 100), storage_mb: v('storage_mb'), sends_per_day: v('sends_per_day'), ai_per_day: v('ai_per_day') } });
+        toast('Plan saved.');
+      } catch (ex) { e2.textContent = ex.message; }
+    };
+    $('#assign-plan', box).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const who = f.who.value.trim();
+      try {
+        await api('/admin/billing/assign', { method: 'POST', body: { ...(/^\d+$/.test(who) ? { orgId: Number(who) } : { userEmail: who }), plan: f.plan.value, seats: Number(f.seats.value), months: Number(f.months.value), paid: f.paid.checked } });
+        toast('Plan assigned.'); openServiceAdmin();
+      } catch (ex) { e2.textContent = ex.message; }
+    };
+  }
 }
 
 // Keyboard shortcuts (Outlook-style)
@@ -1596,7 +1647,66 @@ function editTask(t, pane, listNames) {
 
 // ------------------------------------------------------------ Organization admin center
 const ADMIN_TABS = [['users', 'Users'], ['shared', 'Shared mailboxes'], ['groups', 'Groups'], ['domains', 'Domains'], ['mailflow', 'Mail flow & DLP'],
-  ['trace', 'Message trace'], ['compliance', 'Retention & eDiscovery'], ['audit', 'Audit log'], ['reports', 'Reports']];
+  ['trace', 'Message trace'], ['compliance', 'Retention & eDiscovery'], ['audit', 'Audit log'], ['reports', 'Reports'], ['billing', 'Billing']];
+// ------------------------------------------------------------ plans and billing
+const money = (minor, cur) => { try { return new Intl.NumberFormat(cur === 'INR' ? 'en-IN' : undefined, { style: 'currency', currency: cur, maximumFractionDigits: minor % 100 ? 2 : 0 }).format(minor / 100); } catch { return `${cur} ${(minor / 100).toFixed(2)}`; } };
+const FEATURE_LABELS = { custom_domain: 'Your own domain', shared_mailboxes: 'Shared mailboxes', groups: 'Groups', compliance: 'DLP, retention, litigation hold, eDiscovery', priority_support: 'Priority support' };
+function planCards(o, { business }) {
+  const cur = o.subscription?.plan || o.plan.code;
+  const ai = (n) => (n < 0 ? 'Unlimited AI' : n === 0 ? 'No AI' : `${n} AI requests a day`);
+  return `<div class="plans">${o.plans.map((p) => `<div class="plan ${p.code === cur ? 'current' : ''}">
+    <h4>${esc(p.name)}</h4>
+    <div class="price">${p.price_month ? `${money(p.price_month, o.currency)}<span>/${business ? 'user/' : ''}month</span>` : 'Free'}</div>
+    ${p.price_year ? `<div class="muted small">or ${money(p.price_year, o.currency)} a year${business ? ' per user' : ''}, plus ${esc(o.tax.name)}</div>` : '<div class="muted small">&nbsp;</div>'}
+    <p class="small">${esc(p.description)}</p>
+    <ul class="small"><li>${fmtBytes(p.storage_mb * 1048576)} mailbox</li><li>${p.sends_per_day.toLocaleString()} emails a day</li><li>${ai(p.ai_per_day)}</li>${p.features.filter((f) => FEATURE_LABELS[f]).map((f) => `<li>${FEATURE_LABELS[f]}</li>`).join('')}</ul>
+    ${p.code === cur ? '<span class="tag">Current plan</span>' : `<button class="btn ${p.price_month ? 'primary' : ''}" data-plan="${p.code}">${p.price_month ? 'Choose' : 'Switch to Free'}</button>`}
+  </div>`).join('')}</div>`;
+}
+function invoiceTable(invoices) {
+  if (!invoices.length) return '<p class="muted">No invoices yet.</p>';
+  return `<table><thead><tr><th>Invoice</th><th>Date</th><th>For</th><th>Total</th><th></th></tr></thead><tbody>${invoices.map((i) => `<tr><td>${esc(i.number)}</td><td>${fmtDate(`${i.created_at.replace(' ', 'T')}Z`, true)}</td><td class="small">${esc(i.description)}</td><td>${money(i.total, i.currency)}</td><td><a href="/api/billing/invoices/${i.id}" target="_blank" rel="noopener">View</a></td></tr>`).join('')}</tbody></table>`;
+}
+function subLine(o) {
+  const s = o.subscription;
+  if (!s) return `You are on <strong>${esc(o.plan.name)}</strong>.`;
+  const end = s.currentPeriodEnd ? fmtDate(s.currentPeriodEnd, true) : '';
+  const status = s.status === 'past_due' ? ' <span class="overdue">Payment failed. Update your payment method to keep your plan.</span>' : '';
+  return `You are on <strong>${esc(s.planName)}</strong>${s.seats > 1 ? ` for ${s.seats} users` : ''}, billed ${s.interval === 'year' ? 'yearly' : 'monthly'}${s.provider === 'manual' ? ' by invoice' : ''}.
+    ${end ? (s.cancelAtPeriodEnd ? `It ends on ${end}.` : `Renews on ${end}.`) : ''}${status}`;
+}
+// Wires plan buttons. post(path, body) -> { url } | { subscription }
+function wirePlans(root, o, { business, base, onDone, err }) {
+  const interval = () => ($('[name=interval]:checked', root)?.value || 'month');
+  $$('[data-plan]', root).forEach((b) => {
+    b.onclick = async () => {
+      err.textContent = '';
+      try {
+        const body = { plan: b.dataset.plan, interval: interval() };
+        if (business) {
+          const n = prompt('How many users (seats)?', String(Math.max(o.usage.users, o.subscription?.seats || 1)));
+          if (!n) return;
+          body.seats = Number(n);
+        }
+        const r = await api(`${base}/checkout`, { method: 'POST', body });
+        if (r.url) { location.href = r.url; return; }
+        toast('Plan changed.'); onDone();
+      } catch (ex) { err.textContent = ex.message; }
+    };
+  });
+  const c = $('[data-cancel-plan]', root);
+  if (c) c.onclick = async () => {
+    if (!confirm('Cancel your plan? You keep it until the end of the paid period.')) return;
+    try { await api(`${base}/cancel`, { method: 'POST', body: {} }); toast('Your plan will end at the end of the period.'); onDone(); } catch (ex) { err.textContent = ex.message; }
+  };
+}
+function billingIntro(o) {
+  const used = o.usage.aiPerDay < 0 ? `${o.usage.aiToday} AI requests today` : `${o.usage.aiToday} of ${o.usage.aiPerDay} AI requests used today`;
+  return `<p>${subLine(o)}</p><p class="muted small">${used}. Mailbox size ${fmtBytes(o.usage.storageBytes)}, up to ${o.usage.sendsPerDay.toLocaleString()} emails a day.</p>
+    ${o.canPayOnline ? '' : '<p class="muted small">Online payment is not set up on this server yet. Contact support to upgrade.</p>'}
+    <div class="row interval"><label class="check"><input type="radio" name="interval" value="month" checked> Monthly</label><label class="check"><input type="radio" name="interval" value="year"> Yearly (2 months free)</label></div>`;
+}
+
 const adminState = { tab: 'users' };
 async function openOrgAdmin() { showView('admin'); }
 
@@ -1607,7 +1717,7 @@ VIEWS.admin = async (pane, opts = {}) => {
   const verified = domains.filter((d) => d.verified);
   const domainSelect = verified.length ? `<select name="domain">${verified.map((d) => `<option>${esc(d.name)}</option>`).join('')}</select>` : '';
   pane.innerHTML = `<h2>${esc(org.name)} · Admin center</h2>
-    <div class="tabbar">${ADMIN_TABS.map(([k, l]) => `<button data-atab="${k}" class="${k === tab ? 'active' : ''}">${l}</button>`).join('')}</div>
+    <div class="tabbar">${ADMIN_TABS.filter(([k]) => k !== 'billing' || state.service?.billing).map(([k, l]) => `<button data-atab="${k}" class="${k === tab ? 'active' : ''}">${l}</button>`).join('')}</div>
     <div id="admin-body"></div><p class="form-error" id="admin-err"></p>`;
   $$('[data-atab]', pane).forEach((b) => { b.onclick = () => VIEWS.admin(pane, { tab: b.dataset.atab }); });
   const body = $('#admin-body', pane);
@@ -1799,6 +1909,18 @@ VIEWS.admin = async (pane, opts = {}) => {
     };
     $('#audit-form', body).onsubmit = guard((e) => run(e.target.action.value, e.target.user.value));
     run();
+  }
+
+  if (tab === 'billing') {
+    const o = await api('/org/billing');
+    body.innerHTML = `${billingIntro(o)}<p class="muted small">${o.usage.users} of ${o.usage.seats} seats used. Shared mailboxes are free.</p>
+      ${o.subscription ? `<form id="seat-form" class="row"><label>Seats<input name="seats" type="number" min="${o.usage.users}" value="${o.subscription.seats}"></label><button class="btn">Change seats</button></form>` : ''}
+      ${planCards(o, { business: true })}
+      ${o.subscription && !o.subscription.cancelAtPeriodEnd && o.subscription.provider !== 'manual' ? '<p><button class="link-btn" data-cancel-plan>Cancel plan</button></p>' : ''}
+      <h3>Invoices</h3>${invoiceTable(o.invoices)}`;
+    wirePlans(body, o, { business: true, base: '/org/billing', onDone: reload, err });
+    const sf = $('#seat-form', body);
+    if (sf) sf.onsubmit = guard(async () => { await api('/org/billing/seats', { method: 'PUT', body: { seats: Number(sf.seats.value) } }); toast('Seats updated.'); reload(); });
   }
 
   if (tab === 'reports') {
