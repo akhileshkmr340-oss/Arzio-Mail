@@ -1,12 +1,23 @@
-// SQLite storage (built into Node 22). Schema is designed to port to PostgreSQL
-// in a later phase: plain tables, integer ids, JSON columns as TEXT.
+// Storage: SQLite (built into Node 22) or PostgreSQL. The schema is written
+// once in SQLite syntax; src/sql/translate.js converts it for PostgreSQL.
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
+import { PgDatabase } from './sql/pg-database.js';
 
 fs.mkdirSync(config.dataDir, { recursive: true });
-export const db = new DatabaseSync(path.join(config.dataDir, 'arzio.db'));
+
+// SQLite by default (one server). Set ARZIO_DB_URL=postgres://... to use
+// PostgreSQL, so several Arzio servers can share one database.
+function openDatabase() {
+  const url = process.env.ARZIO_DB_URL || process.env.DATABASE_URL || '';
+  if (/^postgres(ql)?:/i.test(url)) return new PgDatabase(url, { ssl: process.env.ARZIO_DB_SSL || '', schema: process.env.ARZIO_DB_SCHEMA || '' });
+  const d = new DatabaseSync(path.join(config.dataDir, 'arzio.db'));
+  d.dialect = 'sqlite';
+  return d;
+}
+export const db = openDatabase();
 
 db.exec(`
 PRAGMA journal_mode = WAL;
@@ -429,6 +440,14 @@ export function tx(fn) {
 }
 
 export function closeDb() {
-  try { db.exec('PRAGMA optimize'); } catch { /* ignore */ }
+  if (db.dialect === 'sqlite') try { db.exec('PRAGMA optimize'); } catch { /* ignore */ }
   try { db.close(); } catch { /* already closed */ }
+}
+
+// With several Arzio servers on one PostgreSQL database, only one runs the
+// background jobs (outbound queue, reminders, maintenance). The lock belongs
+// to this server's connection, so another server takes over if it goes away.
+export function isJobLeader() {
+  if (db.dialect !== 'postgres') return true;
+  try { return !!db.prepare('SELECT pg_try_advisory_lock(727274) AS ok').get().ok; } catch { return false; }
 }

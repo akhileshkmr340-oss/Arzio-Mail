@@ -1,14 +1,9 @@
 // Mailbox storage: folders, messages, threading, attachments, full-text search.
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import { db, tx } from '../db.js';
 import { config } from '../config.js';
+import * as blobs from '../blobs.js';
 
-const ATTACH_DIR = path.join(config.dataDir, 'attachments');
-fs.mkdirSync(ATTACH_DIR, { recursive: true });
-const RAW_DIR = path.join(config.dataDir, 'raw');
-fs.mkdirSync(RAW_DIR, { recursive: true });
 
 export function folderByRole(userId, role) {
   return db.prepare('SELECT * FROM folders WHERE user_id = ? AND role = ?').get(userId, role);
@@ -124,13 +119,11 @@ export function storeMessage(userId, msg) {
     const id = Number(r.lastInsertRowid);
     if (msg.raw) {
       // Keep the original MIME so IMAP clients get byte-exact messages
-      const rawPath = path.join(RAW_DIR, `${id}-${crypto.randomUUID()}.eml`);
-      fs.writeFileSync(rawPath, msg.raw);
+      const rawPath = blobs.put('raw', `${id}-${crypto.randomUUID()}.eml`, msg.raw);
       db.prepare('UPDATE messages SET raw_path = ? WHERE id = ?').run(rawPath, id);
     }
     for (const a of atts) {
-      const storage = path.join(ATTACH_DIR, `${id}-${crypto.randomUUID()}`);
-      fs.writeFileSync(storage, a.content);
+      const storage = blobs.put('attachments', `${id}-${crypto.randomUUID()}`, a.content);
       db.prepare('INSERT INTO attachments (message_id, filename, content_type, size, storage_path, content_id) VALUES (?, ?, ?, ?, ?, ?)')
         .run(id, String(a.filename || 'attachment').slice(0, 255), a.contentType || 'application/octet-stream', a.content.length, storage, a.contentId || null);
     }
@@ -173,7 +166,7 @@ export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 
   if (q) {
     // Search across all folders except Trash/Junk unless a folder is given
     from = 'messages m JOIN messages_fts f ON f.rowid = m.id';
-    where.push('messages_fts MATCH ?');
+    where.push(FTS_MATCH);
     args.push(ftsQuery(q));
   }
   if (folderId) { where.push('m.folder_id = ?'); args.push(Number(folderId)); } else where.push(NOT_HELD);
@@ -191,11 +184,15 @@ export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 
 }
 
 // Turn user input into a safe FTS5 query: each word becomes a quoted prefix term.
-function ftsQuery(q) {
-  const terms = String(q).match(/[\p{L}\p{N}@._-]+/gu) || [];
+export function ftsQuery(q) {
+  const terms = (String(q).match(/[\p{L}\p{N}@._-]+/gu) || []).slice(0, 10).map((t) => t.replace(/["']/g, '').toLowerCase()).filter(Boolean);
+  if (db.dialect === 'postgres') return terms.length ? terms.map((t) => `'${t}':*`).join(' & ') : "''";
   if (!terms.length) return '""';
-  return terms.slice(0, 10).map((t) => `"${t.replace(/"/g, '')}"*`).join(' ');
+  return terms.map((t) => `"${t}"*`).join(' ');
 }
+// Full-text match on the messages_fts table aliased as f
+export const FTS_MATCH = db.dialect === 'postgres' ? "f.tsv @@ to_tsquery('simple', ?)" : 'messages_fts MATCH ?';
+const FTS_ORDER = db.dialect === 'postgres' ? 'm.date DESC' : 'bm25(messages_fts), m.date DESC';
 
 export function getMessage(userId, id) {
   const m = db.prepare('SELECT * FROM messages WHERE user_id = ? AND id = ?').get(userId, Number(id));
@@ -270,8 +267,8 @@ export function purgeMessage(id, { force = false } = {}) {
     db.prepare('DELETE FROM messages_fts WHERE rowid = ?').run(id);
     db.prepare('DELETE FROM messages WHERE id = ?').run(id);
   });
-  for (const a of atts) fs.rm(a.storage_path, { force: true }, () => {});
-  if (m?.raw_path) fs.rm(m.raw_path, { force: true }, () => {});
+  for (const a of atts) blobs.remove(a.storage_path);
+  if (m?.raw_path) blobs.remove(m.raw_path);
 }
 
 export function saveAi(id, fields) {
@@ -291,15 +288,19 @@ const STOP = new Set('the a an and or of to in on for with about from what when 
 export function searchForQuestion(userId, question, limit = 12) {
   const terms = (String(question).toLowerCase().match(/[\p{L}\p{N}@._-]+/gu) || []).filter((t) => t.length > 1 && !STOP.has(t)).slice(0, 12);
   if (!terms.length) return [];
+  if (db.dialect === 'postgres') {
+    const pq = terms.map((t) => `'${t.replace(/["']/g, '')}':*`).join(' | ');
+    return db.prepare(`SELECT m.* FROM messages_fts f JOIN messages m ON m.id = f.rowid
+      WHERE ${FTS_MATCH} AND m.user_id = ? AND ${NOT_HELD} ORDER BY ts_rank(f.tsv, to_tsquery('simple', ?)) DESC, m.date DESC LIMIT ?`).all(pq, userId, pq, limit).map(hydrate);
+  }
   const q = terms.map((t) => `"${t.replace(/"/g, '')}"*`).join(' OR ');
   return db.prepare(`SELECT m.* FROM messages_fts f JOIN messages m ON m.id = f.rowid
-    WHERE messages_fts MATCH ? AND m.user_id = ? AND ${NOT_HELD} ORDER BY bm25(messages_fts), m.date DESC LIMIT ?`).all(q, userId, limit).map(hydrate);
+    WHERE ${FTS_MATCH} AND m.user_id = ? AND ${NOT_HELD} ORDER BY ${FTS_ORDER} LIMIT ?`).all(q, userId, limit).map(hydrate);
 }
 
 /** Save the original MIME for a message that has none yet (used by IMAP). */
 export function saveRaw(id, raw) {
-  const rawPath = path.join(RAW_DIR, `${id}-${crypto.randomUUID()}.eml`);
-  fs.writeFileSync(rawPath, raw);
+  const rawPath = blobs.put('raw', `${id}-${crypto.randomUUID()}.eml`, raw);
   db.prepare('UPDATE messages SET raw_path = ? WHERE id = ?').run(rawPath, id);
   return rawPath;
 }
@@ -314,10 +315,10 @@ export function copyMessage(userId, id, folderId) {
   return tx(() => {
     const r = db.prepare(`INSERT INTO messages (folder_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(f.id, ...cols.map((c) => m[c]));
     const nid = Number(r.lastInsertRowid);
-    if (m.raw_path && fs.existsSync(m.raw_path)) saveRaw(nid, fs.readFileSync(m.raw_path));
+    const rawData = m.raw_path ? blobs.get(m.raw_path) : null;
+    if (rawData) saveRaw(nid, rawData);
     for (const a of db.prepare('SELECT * FROM attachments WHERE message_id = ?').all(m.id)) {
-      const storage = path.join(ATTACH_DIR, `${nid}-${crypto.randomUUID()}`);
-      fs.copyFileSync(a.storage_path, storage);
+      const storage = blobs.copy(a.storage_path, 'attachments', `${nid}-${crypto.randomUUID()}`);
       db.prepare('INSERT INTO attachments (message_id, filename, content_type, size, storage_path, content_id) VALUES (?, ?, ?, ?, ?, ?)')
         .run(nid, a.filename, a.content_type, a.size, storage, a.content_id);
     }

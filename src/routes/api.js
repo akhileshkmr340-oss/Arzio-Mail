@@ -1,7 +1,7 @@
 // REST API used by the web client (and future mobile apps / integrations).
 import express from 'express';
 import * as billing from '../billing.js';
-import fs from 'node:fs';
+import * as blobs from '../blobs.js';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import { config } from '../config.js';
@@ -191,7 +191,7 @@ api.get('/attachments/:id', (req, res) => {
   res.setHeader('Content-Type', a.content_type);
   res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(a.filename)}`);
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  fs.createReadStream(a.storage_path).pipe(res);
+  blobs.send(res, a.storage_path);
 });
 
 // ------------------------------------------------------------ compose

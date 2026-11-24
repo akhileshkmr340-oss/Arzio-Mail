@@ -8,7 +8,8 @@ import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { simpleParser } from 'mailparser';
 import { config, isLocalDomain } from '../config.js';
 import { storageLimit, sendLimit } from '../billing.js';
-import { db } from '../db.js';
+import * as blobs from '../blobs.js';
+import { db, isJobLeader } from '../db.js';
 import { storeMessage, saveAi, mailboxUsage, getMessage, deleteMessage, folderByRole } from './store.js';
 import { resolveRecipient, checkInbound, senderListMatch, applyRules, shouldAutoReply, recordContacts, addressesOf } from './features.js';
 import { triage } from '../ai/index.js';
@@ -17,8 +18,6 @@ import { applyTransportRules } from './transport-rules.js';
 import { handleInboundCalendar, processReminders } from '../calendar/service.js';
 
 const OUTBOX_DIR = path.join(config.dataDir, 'outbox');
-const QUEUE_DIR = path.join(config.dataDir, 'queue');
-fs.mkdirSync(QUEUE_DIR, { recursive: true });
 
 const addrList = (v) => (v ? (Array.isArray(v) ? v : [v]).flatMap((x) => x.value || []) : [])
   .map((a) => ({ address: String(a.address || '').toLowerCase(), name: a.name || '' }))
@@ -196,8 +195,7 @@ async function enqueueRemoteOrLocal(userId, raw, from, rcpts, subject) {
   for (const r of rcpts) ((await isLocalAddress(r)) ? local : remote).push(r);
   const delivered = local.length ? await deliverRaw(raw, local) : [];
   if (remote.length) {
-    const file = path.join(QUEUE_DIR, `${Date.now()}-${crypto.randomUUID()}.eml`);
-    fs.writeFileSync(file, raw);
+    const file = blobs.put('queue', `${Date.now()}-${crypto.randomUUID()}.eml`, raw);
     const r = db.prepare("INSERT INTO delivery_queue (user_id, raw_path, envelope_from, rcpts_json, subject, next_attempt) VALUES (?, ?, ?, ?, ?, datetime('now'))")
       .run(userId, file, from, JSON.stringify(remote), String(subject || ''));
     await attemptDelivery(Number(r.lastInsertRowid));
@@ -213,15 +211,15 @@ async function attemptDelivery(id) {
   if (!claim.changes) return;
   const rcpts = JSON.parse(q.rcpts_json);
   try {
-    await getTransport().sendMail({ envelope: { from: q.envelope_from, to: rcpts }, raw: fs.readFileSync(q.raw_path) });
+    await getTransport().sendMail({ envelope: { from: q.envelope_from, to: rcpts }, raw: blobs.get(q.raw_path) });
     db.prepare("UPDATE delivery_queue SET status = 'sent', attempts = attempts + 1, last_error = NULL WHERE id = ?").run(id);
-    fs.rm(q.raw_path, { force: true }, () => {});
+    blobs.remove(q.raw_path);
   } catch (e) {
     const attempts = q.attempts + 1;
     const permanent = (e.responseCode && e.responseCode >= 500) || attempts >= BACKOFF_MIN.length;
     if (permanent) {
       db.prepare("UPDATE delivery_queue SET status = 'failed', attempts = ?, last_error = ? WHERE id = ?").run(attempts, String(e.message).slice(0, 500), id);
-      fs.rm(q.raw_path, { force: true }, () => {});
+      blobs.remove(q.raw_path);
       bounceNotice(q.user_id, rcpts, q.subject, e.message);
     } else {
       db.prepare(`UPDATE delivery_queue SET status = 'pending', attempts = ?, last_error = ?, next_attempt = datetime('now', '+${BACKOFF_MIN[attempts - 1]} minutes') WHERE id = ?`)
@@ -401,7 +399,7 @@ export async function performSend(user, input) {
 
 let running = false;
 export async function runWorkersOnce() {
-  if (running) return;
+  if (running || !isJobLeader()) return;
   running = true;
   try {
     // Outbox: messages whose undo window or scheduled time has passed

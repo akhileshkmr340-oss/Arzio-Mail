@@ -106,27 +106,76 @@ These run inside the server, with nothing to schedule:
 
 One server with SQLite handles a few thousand active mailboxes. The signs it
 is time to grow: p95 web response above 500 ms, disk above 70%, or a backup
-that takes longer than 30 minutes.
+that takes longer than 30 minutes. Arzio supports each step below with a
+setting; no code changes.
 
-Steps, in order of payoff:
+### 1. Mail files to S3-compatible storage
 
-1. **Bigger disk and more RAM.** The cheapest step. SQLite with WAL is fast on
-   NVMe.
-2. **Attachments and raw messages to object storage** (S3, R2, B2). They are
-   most of the disk. `store.js` reads and writes them through two folders
-   (`data/attachments`, `data/raw`), which is the only place to change.
-3. **PostgreSQL** for the database, so several web servers can share it:
-   - The schema in `src/db.js` is plain SQL. Swap `INTEGER PRIMARY KEY` for
-     `BIGSERIAL`, `datetime('now')` for `now()`, and move the IMAP UID
-     triggers to PL/pgSQL.
-   - Full-text search moves from FTS5 to a `tsvector` column with a GIN index.
-   - The code uses synchronous `node:sqlite` calls. Wrap them in a small data
-     layer with async methods first, then switch the driver.
-   - Migrate with a one-off script that reads every table from SQLite and
-     inserts in id order, then resets the sequences.
-4. **Several web servers** behind a load balancer once the database is shared.
-   Sessions are already in the database. The background workers (queue,
-   reminders, maintenance) need a lock so only one server runs each job
-   (PostgreSQL advisory locks).
-5. **Separate MX servers** that only receive and hand mail to the shared
-   database, so a spam flood cannot slow the web app.
+Attachments, original messages and queued outgoing mail are most of the disk.
+Put them in Amazon S3, Cloudflare R2, Backblaze B2, Wasabi or MinIO:
+
+```
+ARZIO_S3_BUCKET=arzio-mail
+ARZIO_S3_REGION=ap-south-1
+ARZIO_S3_ENDPOINT=https://s3.ap-south-1.amazonaws.com   # R2: https://<account>.r2.cloudflarestorage.com
+ARZIO_S3_ACCESS_KEY=...
+ARZIO_S3_SECRET_KEY=...
+ARZIO_S3_PATH_STYLE=false                              # true for MinIO
+ARZIO_S3_PREFIX=mail
+```
+
+New files go to the bucket at once; existing files keep working from disk.
+Move the old ones with `node scripts/migrate-files-to-s3.js` (run again with
+`--delete` to free the disk). Keep the bucket private, turn on versioning and
+server-side encryption, and give the access key rights to this bucket only.
+With S3 on, `scripts/backup.js` backs up only the database; the bucket's
+versioning is the backup for files.
+
+### 2. PostgreSQL
+
+```
+ARZIO_DB_URL=postgres://arzio:password@db.internal:5432/arzio
+ARZIO_DB_SSL=true            # for a managed database; "no-verify" for self-signed
+```
+
+Create the database with byte-order collation so dates and addresses compare
+exactly:
+
+```sql
+CREATE DATABASE arzio TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C';
+```
+
+PostgreSQL 14 or newer. Arzio creates its tables on first start. To move an
+existing server: stop it, then
+
+```bash
+ARZIO_DATA_DIR=/opt/arzio/data ARZIO_DB_URL=postgres://... node scripts/migrate-to-postgres.js
+```
+
+It copies every table in one transaction (all or nothing), keeps IMAP message
+numbers so mail apps do not download everything again, and rebuilds the
+search index. Keep the old `arzio.db` until you are happy.
+
+Backups with PostgreSQL: `scripts/backup.js` calls `pg_dump`, so install the
+PostgreSQL client tools of the same major version. Managed databases (RDS,
+Cloud SQL, Neon, Supabase) also take their own snapshots; keep both.
+
+The whole test suite runs against PostgreSQL too:
+`ARZIO_DB_URL=postgres://... ARZIO_DB_SCHEMA=auto npm test`.
+
+### 3. Several servers
+
+With PostgreSQL and S3, run as many Arzio servers as you need behind a load
+balancer, all with the same `.env`:
+
+- Sessions live in the database, so any server can answer any request.
+- Only one server at a time runs the background jobs (outbound queue,
+  reminders, maintenance). It holds a PostgreSQL advisory lock; if it stops,
+  another server takes over within seconds.
+- Point the MX records at two or more servers for inbound mail; sending
+  servers retry the other one if one is down.
+- IMAP and SMTP for mail apps work on every server; a TCP load balancer
+  (nginx `stream`, HAProxy, a cloud network load balancer) spreads them.
+
+Each server keeps one database connection and runs queries in order, so plan
+on one server per 2 CPU cores and add servers rather than cores.

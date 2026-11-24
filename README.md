@@ -27,6 +27,7 @@ It has built-in AI (Claude by default): thread summaries with action items, repl
 | Compliance | Retention policies, litigation hold (deleted mail kept hidden), eDiscovery search across all mailboxes with .mbox export |
 | Migration | Import from Gmail, Outlook / Microsoft 365, Yahoo, Zoho or any IMAP account in the background; .mbox (Google Takeout) and .eml upload |
 | Plans and billing | Free and Premium plans for personal accounts, per-user Business Basic and Standard plans for organizations; storage, sending, AI and feature limits per plan; Razorpay (UPI, cards) and Stripe checkout, GST invoices, cancel and seat changes, manual plans for bank transfers; revenue view for the operator ([docs/BILLING.md](docs/BILLING.md)) |
+| Scale | SQLite for one server, or PostgreSQL (`ARZIO_DB_URL`) for many; mail files on disk or in S3-compatible storage (S3, R2, B2, MinIO); one-step migration scripts; background jobs fail over between servers |
 | Operations | `/health`, `/ready` and Prometheus `/metrics`; graceful shutdown; live backups with rotation and a checked restore; Docker, nginx and systemd kit |
 | Security | scrypt passwords, two-step verification (authenticator apps), HttpOnly sessions, rate limits, SPF/DKIM/DMARC checks and spam scoring on inbound mail, sandboxed HTML mail, CSP, audit log |
 
@@ -55,7 +56,7 @@ Create a service admin (can create private organizations):
 npm run create-admin -- admin 'a-strong-password' "Arzio Admin"
 ```
 
-Run the tests: `npm test` (37 tests).
+Run the tests: `npm test` (39 tests).
 
 ### Connecting a mail app
 
@@ -89,7 +90,9 @@ Private organizations: the service admin creates the organization in **Service a
 src/
   server.js              HTTP server, security headers, starts SMTP/IMAP, graceful shutdown
   config.js              all settings (environment variables)
-  db.js                  SQLite schema and upgrades
+  db.js                  schema and upgrades (SQLite or PostgreSQL)
+  sql/                   PostgreSQL translation, sync bridge, S3 client
+  blobs.js               mail file storage (disk or S3)
   auth.js                accounts, passwords, sessions, app passwords, API tokens
   health.js              /health, /ready, /metrics
   billing.js             plans, limits, Stripe and Razorpay, invoices
@@ -113,12 +116,11 @@ public/                  web app (PWA)
 scripts/                 create-admin, backup, restore
 deploy/                  docker-compose, nginx, systemd, certificate hook
 docs/                    DEPLOY, OPERATIONS, API, BILLING
-test/                    37 end-to-end tests
+test/                    39 end-to-end tests
 ```
 
 ## Known limits
 
-- SQLite on one server: fine for a few thousand mailboxes. The move to object storage and PostgreSQL is planned step by step in [docs/OPERATIONS.md](docs/OPERATIONS.md#growing-past-one-server).
 - Virus scanning of attachments is not built in; add ClamAV at the MX for production.
 - Native iOS and Android apps are not included. Phones use the installable web app, or their built-in mail app over IMAP.
 - Exchange ActiveSync and EWS are not supported; Outlook desktop connects over IMAP, and phones sync calendar and contacts over CalDAV/CardDAV.

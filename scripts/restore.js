@@ -26,6 +26,16 @@ if (fs.existsSync(dataDir) && fs.readdirSync(dataDir).length) {
 fs.mkdirSync(dataDir, { recursive: true });
 const r = spawnSync('tar', ['-xzf', path.resolve(file), '-C', dataDir, '-o'], { stdio: 'inherit' });
 if (r.status !== 0) { console.error('tar failed'); process.exit(1); }
+const pgDump = path.join(dataDir, 'snapshot.pgdump');
+if (fs.existsSync(pgDump)) {
+  const url = process.env.ARZIO_DB_URL || process.env.DATABASE_URL;
+  if (!/^postgres(ql)?:/i.test(url || '')) { console.error('This backup is from PostgreSQL. Set ARZIO_DB_URL to the (empty) database to restore into.'); process.exit(1); }
+  const r2 = spawnSync(process.env.PG_RESTORE || 'pg_restore', ['--no-owner', ...(force ? ['--clean', '--if-exists'] : []), '--dbname', url], { stdio: [fs.openSync(pgDump, 'r'), 'inherit', 'inherit'] });
+  fs.rmSync(pgDump);
+  if (r2.status !== 0) { console.error('pg_restore reported errors (see above).'); process.exit(1); }
+  console.log(`Restored the PostgreSQL database and mail files into ${dataDir}. Start the server.`);
+  process.exit(0);
+}
 const snap = path.join(dataDir, 'snapshot.db');
 if (fs.existsSync(snap)) fs.renameSync(snap, path.join(dataDir, 'arzio.db'));
 const db = new DatabaseSync(path.join(dataDir, 'arzio.db'), { readOnly: true });

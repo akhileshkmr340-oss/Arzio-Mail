@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE,
   plan_id INTEGER NOT NULL REFERENCES plans(id),
-  interval TEXT NOT NULL DEFAULT 'month',  -- month | year
+  period TEXT NOT NULL DEFAULT 'month',    -- month | year
   seats INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'active',   -- pending | active | past_due | canceled
   provider TEXT NOT NULL DEFAULT 'manual', -- manual | stripe | razorpay
@@ -99,8 +99,8 @@ CREATE TABLE IF NOT EXISTS ai_usage (
   PRIMARY KEY (user_id, day)
 );
 CREATE TABLE IF NOT EXISTS provider_plans (
-  provider TEXT NOT NULL, plan_id INTEGER NOT NULL, interval TEXT NOT NULL, amount INTEGER NOT NULL, ref TEXT NOT NULL,
-  PRIMARY KEY (provider, plan_id, interval, amount)
+  provider TEXT NOT NULL, plan_id INTEGER NOT NULL, period TEXT NOT NULL, amount INTEGER NOT NULL, ref TEXT NOT NULL,
+  PRIMARY KEY (provider, plan_id, period, amount)
 );
 CREATE TABLE IF NOT EXISTS webhook_events (
   provider TEXT NOT NULL, event_id TEXT NOT NULL, received_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -131,7 +131,7 @@ function planRow(p) {
 export const getPlan = (id) => planRow(db.prepare('SELECT * FROM plans WHERE id = ?').get(id));
 export const planByCode = (code) => planRow(db.prepare('SELECT * FROM plans WHERE code = ?').get(code));
 export function listPlans({ audience, all = false } = {}) {
-  return db.prepare(`SELECT * FROM plans WHERE (? IS NULL OR audience = ?) AND (? OR is_public = 1) ORDER BY sort, id`)
+  return db.prepare(`SELECT * FROM plans WHERE (? IS NULL OR audience = ?) AND (? = 1 OR is_public = 1) ORDER BY sort, id`)
     .all(audience ?? null, audience ?? null, all ? 1 : 0).map(planRow);
 }
 
@@ -238,16 +238,16 @@ function nextInvoiceNumber() {
 export function recordPayment(sub, { amount, providerRef, periodStart, periodEnd }) {
   if (providerRef && db.prepare('SELECT 1 FROM invoices WHERE provider_ref = ?').get(providerRef)) return null;
   const plan = getPlan(sub.plan_id);
-  const p = priceFor(plan, sub.interval, sub.seats);
+  const p = priceFor(plan, sub.period, sub.seats);
   // The provider's amount (tax included) wins if it differs from our price list
   const total = Number.isFinite(amount) && amount > 0 ? amount : p.total;
   const subtotal = Math.round(total / (1 + billingConfig.taxPercent / 100));
   const start = periodStart || new Date().toISOString();
-  const end = periodEnd || addInterval(start, sub.interval);
+  const end = periodEnd || addInterval(start, sub.period);
   const r = db.prepare(`INSERT INTO invoices (number, subscription_id, user_id, org_id, bill_to, description, currency, subtotal, tax, total, status, provider, provider_ref, period_start, period_end)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?, ?, ?, ?)`).run(
     nextInvoiceNumber(), sub.id, sub.user_id, sub.org_id, billTo(sub),
-    `${config.serviceName} ${plan.name}, ${sub.seats > 1 ? `${sub.seats} users, ` : ''}${sub.interval === 'year' ? 'yearly' : 'monthly'}`,
+    `${config.serviceName} ${plan.name}, ${sub.seats > 1 ? `${sub.seats} users, ` : ''}${sub.period === 'year' ? 'yearly' : 'monthly'}`,
     billingConfig.currency, subtotal, total - subtotal, total, sub.provider, providerRef || null, start, end);
   db.prepare("UPDATE subscriptions SET status = 'active', past_due_since = NULL, current_period_end = ?, updated_at = datetime('now') WHERE id = ?").run(end, sub.id);
   audit(sub.user_id || null, 'billing.payment', { subscription: sub.id, total, provider: sub.provider });
@@ -272,7 +272,7 @@ function activate(scope, plan, { interval = 'month', seats = 1, provider = 'manu
   }
   if (old) db.prepare("UPDATE subscriptions SET status = 'canceled', updated_at = datetime('now') WHERE id = ?").run(old.id);
   db.prepare("UPDATE subscriptions SET status = 'canceled' WHERE status = 'pending' AND (user_id IS ? AND org_id IS ?)").run(scope.userId ?? null, scope.orgId ?? null);
-  const r = db.prepare(`INSERT INTO subscriptions (user_id, org_id, plan_id, interval, seats, status, provider, provider_ref, current_period_end)
+  const r = db.prepare(`INSERT INTO subscriptions (user_id, org_id, plan_id, period, seats, status, provider, provider_ref, current_period_end)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(scope.userId ?? null, scope.orgId ?? null, plan.id, interval, seats, status, provider, providerRef, periodEnd);
   if (scope.orgId) db.prepare('UPDATE organizations SET max_users = ? WHERE id = ?').run(seats, scope.orgId);
   return db.prepare('SELECT * FROM subscriptions WHERE id = ?').get(r.lastInsertRowid);
@@ -305,7 +305,7 @@ export async function startCheckout(user, { plan: code, interval = 'month', seat
   const prov = provider || defaultProvider();
   if (!prov) throw httpErr(503, 'Online payment is not set up yet. Contact support to upgrade.');
   const price = priceFor(plan, interval, n);
-  const pending = db.prepare(`INSERT INTO subscriptions (user_id, org_id, plan_id, interval, seats, status, provider) VALUES (?, ?, ?, ?, ?, 'pending', ?)`)
+  const pending = db.prepare(`INSERT INTO subscriptions (user_id, org_id, plan_id, period, seats, status, provider) VALUES (?, ?, ?, ?, ?, 'pending', ?)`)
     .run(scope.userId ?? null, scope.orgId ?? null, plan.id, interval, n, prov).lastInsertRowid;
   const meta = { arzio_subscription: String(pending) };
   let out;
@@ -397,7 +397,7 @@ export function runBillingMaintenance(now = new Date()) {
 export function publicSub(s) {
   if (!s) return null;
   const plan = getPlan(s.plan_id);
-  return { id: s.id, plan: plan.code, planName: plan.name, interval: s.interval, seats: s.seats, status: s.status, provider: s.provider, currentPeriodEnd: s.current_period_end, cancelAtPeriodEnd: !!s.cancel_at_period_end };
+  return { id: s.id, plan: plan.code, planName: plan.name, interval: s.period, seats: s.seats, status: s.status, provider: s.provider, currentPeriodEnd: s.current_period_end, cancelAtPeriodEnd: !!s.cancel_at_period_end };
 }
 
 export function overview(user, { forOrg = false } = {}) {
@@ -503,7 +503,7 @@ function promote(sub, providerRef) {
   const plan = getPlan(sub.plan_id);
   // Replace the pending row with a live one (cancels any previous plan)
   db.prepare("UPDATE subscriptions SET status = 'canceled' WHERE id = ?").run(sub.id);
-  const live = activate(scope, plan, { interval: sub.interval, seats: sub.seats, provider: sub.provider, providerRef });
+  const live = activate(scope, plan, { interval: sub.period, seats: sub.seats, provider: sub.provider, providerRef });
   db.prepare('UPDATE subscriptions SET checkout_ref = ? WHERE id = ?').run(sub.checkout_ref, live.id);
   audit(sub.user_id || null, 'billing.plan.change', { plan: plan.code, provider: sub.provider, org: sub.org_id });
   return live;
@@ -559,13 +559,13 @@ async function razorpayApi(method, p, body) {
 }
 
 async function razorpayPlanId(plan, interval, unit) {
-  const row = db.prepare('SELECT ref FROM provider_plans WHERE provider = ? AND plan_id = ? AND interval = ? AND amount = ?').get('razorpay', plan.id, interval, unit);
+  const row = db.prepare('SELECT ref FROM provider_plans WHERE provider = ? AND plan_id = ? AND period = ? AND amount = ?').get('razorpay', plan.id, interval, unit);
   if (row) return row.ref;
   const p = await razorpayApi('POST', '/v1/plans', {
     period: interval === 'year' ? 'yearly' : 'monthly', interval: 1,
     item: { name: `${config.serviceName} ${plan.name}`, amount: unit, currency: billingConfig.currency },
   });
-  db.prepare('INSERT OR REPLACE INTO provider_plans (provider, plan_id, interval, amount, ref) VALUES (?, ?, ?, ?, ?)').run('razorpay', plan.id, interval, unit, p.id);
+  db.prepare('INSERT OR REPLACE INTO provider_plans (provider, plan_id, period, amount, ref) VALUES (?, ?, ?, ?, ?)').run('razorpay', plan.id, interval, unit, p.id);
   return p.id;
 }
 
@@ -634,7 +634,7 @@ export function revenueReport() {
   let mrr = 0;
   const byPlan = {};
   for (const s of live) {
-    const monthly = s.interval === 'year' ? s.price_year / 12 : s.price_month;
+    const monthly = s.period === 'year' ? s.price_year / 12 : s.price_month;
     mrr += monthly * s.seats;
     byPlan[s.code] = byPlan[s.code] || { plan: s.name, subscriptions: 0, seats: 0 };
     byPlan[s.code].subscriptions++;

@@ -10,6 +10,7 @@ import { simpleParser } from 'mailparser';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import addressparser from 'nodemailer/lib/addressparser/index.js';
 import { storageLimit } from '../billing.js';
+import * as blobs from '../blobs.js';
 import { config } from '../config.js';
 import { db } from '../db.js';
 import { clientLogin } from '../auth.js';
@@ -265,7 +266,8 @@ function folderForName(userId, name) {
 const nameOf = (f) => (f.role === 'inbox' ? 'INBOX' : encodeMailbox(f.name));
 
 async function rawOf(m) {
-  if (m.raw_path && fs.existsSync(m.raw_path)) return fs.readFileSync(m.raw_path);
+  const stored = m.raw_path ? blobs.get(m.raw_path) : null;
+  if (stored) return stored;
   // Messages without stored MIME (drafts written in the web app, system notices): build it once
   const atts = db.prepare('SELECT * FROM attachments WHERE message_id = ?').all(m.id);
   const raw = await new MailComposer({
@@ -273,7 +275,7 @@ async function rawOf(m) {
     to: JSON.parse(m.to_json || '[]'), cc: JSON.parse(m.cc_json || '[]'),
     subject: m.subject, text: m.text_body, html: m.html_body || undefined,
     date: new Date(m.date), messageId: m.message_id || undefined, inReplyTo: m.in_reply_to || undefined, references: m.refs || undefined,
-    attachments: atts.map((a) => ({ filename: a.filename, contentType: a.content_type, path: a.storage_path, cid: a.content_id || undefined })),
+    attachments: atts.map((a) => ({ filename: a.filename, contentType: a.content_type, content: blobs.get(a.storage_path) || Buffer.alloc(0), cid: a.content_id || undefined })),
   }).compile().build();
   store.saveRaw(m.id, raw);
   return raw;

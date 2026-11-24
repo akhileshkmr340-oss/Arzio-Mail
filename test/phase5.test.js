@@ -130,9 +130,12 @@ test('health, readiness and metrics', async () => {
   delete process.env.METRICS_TOKEN;
 });
 
-test('backup while running, then restore into a fresh folder', async () => {
+const { db: liveDb } = await import('../src/db.js');
+const onPg = liveDb.dialect === 'postgres';
+
+test('backup while running, then restore into a fresh folder', { skip: onPg && !process.env.PG_DUMP ? 'PostgreSQL backups need pg_dump (set PG_DUMP)' : false }, async () => {
   const out = path.join(dir, 'backups');
-  const env = { ...process.env, ARZIO_DATA_DIR: dataDir };
+  const env = { ...process.env, ARZIO_DATA_DIR: dataDir, ...(onPg ? { ARZIO_DB_SCHEMA: liveDb.schema } : {}) };
   for (let i = 0; i < 3; i++) {
     const b = spawnSync(process.execPath, ['--no-warnings', 'scripts/backup.js', '--out', out, '--keep', '2'], { env, encoding: 'utf8' });
     assert.equal(b.status, 0, b.stderr);
@@ -142,6 +145,22 @@ test('backup while running, then restore into a fresh folder', async () => {
   const files = fs.readdirSync(out).filter((f) => f.endsWith('.tar.gz'));
   assert.equal(files.length, 2, 'rotation keeps the newest 2');
   const target = path.join(dir, 'restored');
+  if (onPg) {
+    // Restore into a new, empty database
+    const name = `arzio_restore_${process.pid}`;
+    liveDb.prepare(`DROP DATABASE IF EXISTS ${name}`).run();
+    liveDb.prepare(`CREATE DATABASE ${name}`).run();
+    const url = process.env.ARZIO_DB_URL.replace(/\/[^/?]+(\?|$)/, `/${name}$1`);
+    const r = spawnSync(process.execPath, ['--no-warnings', 'scripts/restore.js', path.join(out, files.sort().at(-1))], { env: { ...process.env, ARZIO_DATA_DIR: target, ARZIO_DB_URL: url }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const pg = (await import('pg')).default;
+    const c = new pg.Client({ connectionString: url });
+    await c.connect();
+    assert.equal(Number((await c.query(`SELECT COUNT(*) AS n FROM ${liveDb.schema}.users`)).rows[0].n), 2);
+    await c.end();
+    liveDb.prepare(`DROP DATABASE IF EXISTS ${name}`).run();
+    return;
+  }
   const r = spawnSync(process.execPath, ['--no-warnings', 'scripts/restore.js', path.join(out, files.sort().at(-1))], { env: { ...process.env, ARZIO_DATA_DIR: target }, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.ok(fs.existsSync(path.join(target, 'arzio.db')));

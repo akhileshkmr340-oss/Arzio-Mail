@@ -1,6 +1,6 @@
 // Hourly housekeeping: empty old Deleted Items, apply organization retention
 // policies (skipped under litigation hold), clear expired sessions and old queue rows.
-import { db } from './db.js';
+import { db, isJobLeader } from './db.js';
 import { runBillingMaintenance } from './billing.js';
 import { purgeMessage } from './mail/store.js';
 
@@ -27,7 +27,7 @@ export function runMaintenance() {
 }
 
 export function startMaintenance() {
-  const t = setInterval(() => { try { runMaintenance(); } catch (e) { console.error('[maintenance]', e); } }, 3600e3);
+  const t = setInterval(() => { try { if (isJobLeader()) runMaintenance(); } catch (e) { console.error('[maintenance]', e); } }, 3600e3);
   t.unref();
   return t;
 }

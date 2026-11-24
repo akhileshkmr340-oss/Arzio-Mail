@@ -114,7 +114,7 @@ features.get('/contacts/suggest', (req, res) => res.json({ suggestions: suggestC
 features.get('/contacts', (req, res) => {
   const like = `%${String(req.query.q || '').toLowerCase()}%`;
   res.json({ contacts: db.prepare(`SELECT * FROM contacts WHERE user_id = ? AND (is_saved = 1 OR ? = '1') AND (lower(email) LIKE ? OR lower(name) LIKE ? OR lower(company) LIKE ?)
-    ORDER BY CASE WHEN name = '' THEN email ELSE name END COLLATE NOCASE LIMIT 1000`).all(req.user.id, req.query.all === '1' ? '1' : '0', like, like, like) });
+    ORDER BY lower(CASE WHEN name = '' THEN email ELSE name END) LIMIT 1000`).all(req.user.id, req.query.all === '1' ? '1' : '0', like, like, like) });
 });
 features.post('/contacts', wrap(async (req, res) => {
   const c = cleanContact(req.body);

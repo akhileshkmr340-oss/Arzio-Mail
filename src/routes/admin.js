@@ -3,7 +3,6 @@
 // eDiscovery, audit log, reports) and mail import for every user.
 import express from 'express';
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import { db, tx } from '../db.js';
 import { config } from '../config.js';
 import { httpError, requireOrgAdmin, createUser } from '../auth.js';
@@ -11,6 +10,7 @@ import { listTransportRules, SENSITIVE_TYPES } from '../mail/transport-rules.js'
 import { listAudit, audit } from '../audit.js';
 import * as store from '../mail/store.js';
 import { requireFeature, limitsFor } from '../billing.js';
+import * as blobs from '../blobs.js';
 import { startImapImport, importFile, listJobs, PRESETS } from '../mail/import.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -209,8 +209,9 @@ function discover(orgId, { q, from, to, mailbox }) {
   let src = 'messages m JOIN users u ON u.id = m.user_id';
   if (q) {
     src += ' JOIN messages_fts f ON f.rowid = m.id';
-    where.push('messages_fts MATCH ?');
-    args.push(String(q).match(/[\p{L}\p{N}@._-]+/gu)?.map((t) => `"${t}"`).join(' ') || '""');
+    where.push(store.FTS_MATCH);
+    const terms = (String(q).match(/[\p{L}\p{N}@._-]+/gu) || []).map((t) => t.replace(/["']/g, '').toLowerCase()).filter(Boolean);
+    args.push(db.dialect === 'postgres' ? (terms.map((t) => `'${t}'`).join(' & ') || "''") : (terms.map((t) => `"${t}"`).join(' ') || '""'));
   }
   if (from) { where.push('m.date >= ?'); args.push(new Date(from).toISOString()); }
   if (to) { where.push('m.date <= ?'); args.push(new Date(to).toISOString()); }
@@ -231,7 +232,8 @@ admin.post('/org/ediscovery/export', requireOrgAdmin, requireFeature('compliance
   res.setHeader('Content-Disposition', `attachment; filename="ediscovery-${new Date().toISOString().slice(0, 10)}.mbox"`);
   for (const h of hits) {
     let raw;
-    if (h.raw_path && fs.existsSync(h.raw_path)) raw = fs.readFileSync(h.raw_path, 'latin1');
+    const stored = h.raw_path ? blobs.get(h.raw_path) : null;
+    if (stored) raw = stored.toString('latin1');
     else {
       const m = store.getMessage(h.user_id, h.id);
       raw = `From: ${m.from_addr}\r\nTo: ${m.to.map((p) => p.address).join(', ')}\r\nSubject: ${m.subject}\r\nDate: ${new Date(m.date).toUTCString()}\r\n\r\n${m.text_body}`;
