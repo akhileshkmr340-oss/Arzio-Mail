@@ -1677,13 +1677,14 @@ async function pollNotifications() {
 }
 $('#bell-btn').addEventListener('click', async (e) => {
   e.stopPropagation();
+  const anchor = e.currentTarget;
   if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
   const { notifications } = await api('/notifications');
   const items = notifications.slice(0, 10).map((n) => [`${n.is_read ? '' : '● '}${n.title}${n.body ? ` — ${n.body.replace(/Starts (\S+)/, (_, d) => `starts ${new Date(d).toLocaleString()}`)}` : ''}`, () => {
     if (n.link.eventId) showView('calendar', { date: n.link.start });
     else if (n.link.taskId) showView('tasks');
   }]);
-  popMenu(e.currentTarget, items.length ? items : [['No reminders yet', () => {}]]);
+  popMenu(anchor, items.length ? items : [['No reminders yet', () => {}]]);
   await api('/notifications/read', { method: 'POST', body: {} });
   pollNotifications();
 });
@@ -2858,11 +2859,12 @@ function collapsedGroup(g, gi) {
 }
 function openFoldedGroup(btn) {
   const g = (RIBBON[RB.tab] || RIBBON.home)[Number(btn.dataset.rgroup)];
-  const one = !!curMsg() && state.multi.size <= 1;
-  const any = state.view === 'mail' && (state.multi.size > 0 || !!state.selectedId);
-  const items = groupItems(g).map((it) => (it.search ? { id: 'searchpeople', label: 'Search People\u2026' } : it))
-    .filter((it) => !it.needs || (it.needs === 'one' ? one : any));
-  popMenu(btn, items.map((it) => [`${it.label.replace('/ ', '/')}${it.menu ? ' \u25B8' : ''}`, () => (it.id === 'searchpeople' ? searchPeople(prompt('Search People') || '') : RB_COMMANDS[it.id](btn))]));
+  const items = groupItems(g).map((it) => (it.search ? { id: 'searchpeople', label: 'Search People\u2026' } : it));
+  popMenu(btn, items.map((it) => [`${it.label.replace('/ ', '/')}${it.menu ? ' \u25B8' : ''}`, async () => {
+    if (it.id === 'searchpeople') return searchPeople(prompt('Search People') || '');
+    if (!(await ensureTarget(needsOf(it.id), DESTRUCTIVE.has(it.id)))) return;
+    return RB_COMMANDS[it.id](btn);
+  }]));
 }
 function ribbonSync() {
   const box = $('#ribbon');
@@ -2871,10 +2873,44 @@ function ribbonSync() {
   const one = inMail && !!state.current && state.current.message.id === state.selectedId && state.multi.size <= 1;
   const any = inMail && (state.multi.size > 0 || !!state.selectedId);
   const f = currentFolder();
-  $$('[data-needs]', box).forEach((b) => { b.disabled = b.dataset.needs === 'one' ? !one : !any; });
-  $$('[data-folder-needs]', box).forEach((b) => { b.disabled = !inMail || !f || state.q || state.smart || (b.dataset.folderNeeds === 'custom' && !!f.role); });
-  $$('.qs', box).forEach((b) => { const s = RB.quickSteps?.[Number(b.dataset.qs)]; b.disabled = !s || (!any && !s.actions.every((a) => a.type === 'newmail')); });
+  // Every button stays active. Without a selection, a button picks the message
+  // or folder to work on itself (see ensureTarget), so it only shows a hint here.
+  $$('[data-needs]', box).forEach((b) => b.classList.toggle('idle', b.dataset.needs === 'one' ? !one : !any));
+  $$('[data-folder-needs]', box).forEach((b) => b.classList.toggle('idle', !inMail || !f || !!state.q || !!state.smart));
 }
+
+// Make sure a ribbon command has something to work on: open the mail view and the
+// Inbox if needed, and open the top message when nothing is selected.
+async function ensureTarget(needs, destructive = false) {
+  if (!needs) return true;
+  const inbox = state.folders.find((f) => f.role === 'inbox');
+  if (state.view !== 'mail') { showMailView(); if (!state.folderId && inbox) state.folderId = inbox.id; await loadList(); }
+  if (needs === 'folder') {
+    if (!currentFolder() || state.q || state.smart) {
+      state.q = ''; state.smart = null; $('#search-input').value = '';
+      if (!currentFolder() && inbox) state.folderId = inbox.id;
+      renderFolders(); await loadList();
+    }
+    return !!currentFolder();
+  }
+  if (needs === 'any' && (state.multi.size || state.selectedId)) return true;
+  if (needs === 'one' && curMsg() && state.multi.size <= 1) return true;
+  if (needs === 'one' && state.multi.size > 1) { const first = state.messages.find((m) => state.multi.has(m.id)); await openMessage(first.id); return true; }
+  if (state.selectedId) { await openMessage(state.selectedId); return true; }
+  if (!state.messages.length && inbox && state.folderId !== inbox.id) { selectFolder(inbox.id); await loadList(); }
+  const top = state.messages[0];
+  if (!top) { toast('There are no messages here yet. New mail will show up in the Inbox.'); return false; }
+  await openMessage(top.id);
+  if (destructive) { toast(`Selected "${top.subject || '(no subject)'}". Press the button again to go ahead, or pick another message.`); return false; }
+  toast(`Working on "${top.subject || '(no subject)'}". Select another message to change it.`);
+  return true;
+}
+// Buttons that remove mail never act on a message you did not pick
+const DESTRUCTIVE = new Set(['delete', 'archive']);
+const needsOf = (id) => {
+  for (const groups of Object.values(RIBBON)) for (const g of groups) for (const it of g.items) for (const x of (it.stack || [it])) if (x.id === id) return x.needs || (x.needsFolder ? 'folder' : null);
+  return null;
+};
 
 // Which messages a ribbon command works on: the multi-selection, else the open message
 const targetIds = () => (state.multi.size ? [...state.multi] : state.selectedId ? [state.selectedId] : []);
@@ -2892,9 +2928,19 @@ async function bulk(action, extra = {}) {
   return ids;
 }
 
-function pickFolder(title, { exclude } = {}) {
+// Standard folders (Inbox, Sent…) can't be renamed or deleted, so ask which of your own folders to use
+async function ownFolder(title) {
+  const f = currentFolder();
+  if (f && !f.role) return f;
+  if (!state.folders.some((x) => !x.role)) {
+    if (confirm('Standard folders like Inbox and Sent Items can\'t be renamed or deleted, and you have no folders of your own yet. Create one now?')) $('#new-folder-btn').click();
+    return null;
+  }
+  return pickFolder(title, { only: 'custom' });
+}
+function pickFolder(title, { exclude, only } = {}) {
   return new Promise((resolve) => {
-    const m = modal(`<h2>${esc(title)}</h2><div class="folder-pick">${state.folders.filter((f) => f.id !== exclude).map((f) => `<button type="button" class="btn" data-pick="${f.id}">${FOLDER_ICONS[f.role] || '\u{1F4C1}'} ${esc(f.name)}</button>`).join('')}</div>
+    const m = modal(`<h2>${esc(title)}</h2><div class="folder-pick">${state.folders.filter((f) => f.id !== exclude && (only !== 'custom' || !f.role)).map((f) => `<button type="button" class="btn" data-pick="${f.id}">${FOLDER_ICONS[f.role] || '\u{1F4C1}'} ${esc(f.name)}</button>`).join('')}</div>
       <div class="actions"><button type="button" class="link-btn" data-newf>+ New folder</button><button class="btn" type="button" data-close>Cancel</button></div>`);
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
@@ -3345,9 +3391,10 @@ const RB_COMMANDS = {
   undosend: () => openSettings('general'),
   // Folder
   newfolder: () => $('#new-folder-btn').click(),
-  renamefolder: async () => { const f = currentFolder(); const name = prompt('Folder name', f.name); if (name?.trim()) { await api(`/folders/${f.id}`, { method: 'PATCH', body: { name } }); await loadFolders(); renderRibbon(); } },
+  renamefolder: async () => { const f = await ownFolder('Rename which folder?'); if (!f) return; const name = prompt('Folder name', f.name); if (name?.trim()) { await api(`/folders/${f.id}`, { method: 'PATCH', body: { name } }); await loadFolders(); renderRibbon(); } },
   deletefolder: async () => {
-    const f = currentFolder();
+    const f = await ownFolder('Delete which folder?');
+    if (!f) return;
     if (!confirm(`Delete "${f.name}"? Its messages move to Deleted Items.`)) return;
     await api(`/folders/${f.id}`, { method: 'DELETE' }); state.folderId = null; await loadFolders(); selectFolder(state.folders[0].id);
   },
@@ -3419,10 +3466,10 @@ const RB_COMMANDS = {
 };
 
 function fileMenu(anchor) {
-  const m = curMsg();
   popMenu(anchor, [
     ['ℹ Info: account and storage', () => openSettings('general')],
-    ...(m ? [['\u{1F4BE} Save As (.eml)', () => saveAsFile(m.id)], ['\u{1F5A8} Print', () => printMessage(m, state.current.thread)]] : []),
+    ['\u{1F4BE} Save As (.eml)', async () => { if (await ensureTarget('one')) await saveAsFile(curMsg().id); }],
+    ['\u{1F5A8} Print', async () => { if (await ensureTarget('one')) printMessage(curMsg(), state.current.thread); }],
     ['✉ Automatic Replies', () => openSettings('ooo')],
     ['⚙ Rules and Alerts', () => openSettings('rules')],
     ['\u{1F6E0} Options', () => openSettings()],
@@ -3439,13 +3486,20 @@ $('#ribbon')?.addEventListener('click', async (e) => {
   const folded = e.target.closest('[data-rgroup]');
   if (folded) return openFoldedGroup(folded);
   const qs = e.target.closest('[data-qs]');
-  if (qs) { try { await runQuickStep(Number(qs.dataset.qs)); } catch (ex) { toast(ex.message); } return; }
+  if (qs) {
+    try {
+      const step = RB.quickSteps[Number(qs.dataset.qs)];
+      if (step && !step.actions.every((a) => a.type === 'newmail') && !(await ensureTarget('any', step.actions.some((a) => ['move', 'archive', 'delete'].includes(a.type))))) return;
+      await runQuickStep(Number(qs.dataset.qs));
+    } catch (ex) { toast(ex.message); }
+    return;
+  }
   const b = e.target.closest('[data-rb]');
-  if (!b || b.disabled) return;
+  if (!b) return;
   const cmd = RB_COMMANDS[b.dataset.rb];
   if (!cmd) return;
   e.stopPropagation();
-  try { await cmd(b); } catch (ex) { toast(ex.message); }
+  try { if (await ensureTarget(needsOf(b.dataset.rb), DESTRUCTIVE.has(b.dataset.rb))) await cmd(b); } catch (ex) { toast(ex.message); }
 });
 $('#ribbon')?.addEventListener('keydown', (e) => {
   if (e.target.id === 'rb-people' && e.key === 'Enter') { e.preventDefault(); searchPeople(e.target.value).catch((ex) => toast(ex.message)); }
