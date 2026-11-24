@@ -27,4 +27,5 @@ export function runMaintenance() {
 export function startMaintenance() {
   const t = setInterval(() => { try { runMaintenance(); } catch (e) { console.error('[maintenance]', e); } }, 3600e3);
   t.unref();
+  return t;
 }

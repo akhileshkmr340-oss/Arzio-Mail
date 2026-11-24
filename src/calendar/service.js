@@ -100,7 +100,10 @@ async function sendIcs(user, { method, event, to, replyFrom, subjectPrefix }) {
 
 export async function createEvent(user, body) {
   const e = cleanEvent(body);
-  const uid = `${crypto.randomUUID()}@${config.primaryDomain}`;
+  // CalDAV clients choose their own UID
+  const wanted = typeof body.uid === 'string' && /^[\x21-\x7e]{1,255}$/.test(body.uid) ? body.uid : null;
+  if (wanted && db.prepare('SELECT 1 FROM events WHERE user_id = ? AND uid = ?').get(user.id, wanted)) throw httpErr(409, 'An event with that UID exists.');
+  const uid = wanted || `${crypto.randomUUID()}@${config.primaryDomain}`;
   const r = db.prepare(`INSERT INTO events (user_id, uid, title, location, description, start_at, end_at, all_day, recurrence, recur_until,
       organizer_email, organizer_name, attendees_json, my_status, online_url, reminder_minutes, show_as, color)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'organizer', ?, ?, ?, ?)`)

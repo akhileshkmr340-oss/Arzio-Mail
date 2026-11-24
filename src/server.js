@@ -6,6 +6,9 @@ import { config } from './config.js';
 import { ensurePublicTenant } from './db.js';
 import { api } from './routes/api.js';
 import { mcpRouter } from './mcp.js';
+import { dav, wellKnown } from './dav.js';
+import { health, markShuttingDown } from './health.js';
+import { closeDb } from './db.js';
 import { startImap } from './mail/imap.js';
 import { startSubmission } from './mail/smtp-submission.js';
 import { startInboundSmtp } from './mail/smtp-inbound.js';
@@ -39,13 +42,16 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
+app.use(health);
+app.use(wellKnown);
+app.use('/dav', dav);
 app.use('/mcp', mcpRouter);
 app.use('/api', express.json({ limit: Math.ceil((config.quotas.maxMessageBytes * 1.4) / 1024 / 1024) + 'mb' }));
 app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
 
 app.use(express.static(path.join(here, '..', 'public'), { index: 'index.html' }));
-app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(here, '..', 'public', 'index.html')));
+app.get(/^\/(?!api\/|dav\/).*/, (req, res) => res.sendFile(path.join(here, '..', 'public', 'index.html')));
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
@@ -55,13 +61,39 @@ app.use((err, req, res, next) => {
 });
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  app.listen(config.http.port, config.http.host, () => {
+  const servers = [];
+  const web = app.listen(config.http.port, config.http.host, () => {
     console.log(`${config.serviceName} web on http://localhost:${config.http.port}  (domain: ${config.primaryDomain})`);
     console.log(`[ai] provider: ${aiInfo().provider}${aiInfo().model ? ` (${aiInfo().model})` : ''}  [outbound] ${config.outbound.transport}`);
   });
-  if (config.inbound.smtpEnabled) startInboundSmtp();
-  if (config.imap.enabled) startImap();
-  if (config.submission.enabled) startSubmission();
-  startWorkers();
-  startMaintenance();
+  servers.push(['web', web]);
+  if (config.inbound.smtpEnabled) servers.push(['smtp', startInboundSmtp()]);
+  if (config.imap.enabled) servers.push(['imap', startImap()]);
+  if (config.submission.enabled) servers.push(['submission', startSubmission()]);
+  const timers = [startWorkers(), startMaintenance()];
+
+  // Graceful shutdown: stop taking new connections, let open requests finish,
+  // then close the database cleanly. Hard exit after 15 seconds.
+  let stopping = false;
+  const shutdown = (signal) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`[server] ${signal} received, shutting down`);
+    markShuttingDown();
+    for (const t of timers) if (t) clearInterval(t);
+    const force = setTimeout(() => { console.error('[server] forced exit'); process.exit(1); }, 15000);
+    force.unref();
+    Promise.all(servers.map(([name, s]) => new Promise((resolve) => {
+      if (!s?.close) return resolve();
+      try { s.close(() => resolve()); } catch { resolve(); }
+      if (name === 'web') web.closeIdleConnections?.();
+      if (name === 'imap') for (const sock of s._arzioSockets || []) sock.end('* BYE Server shutting down\r\n');
+    }))).then(() => {
+      closeDb();
+      console.log('[server] stopped');
+      process.exit(0);
+    });
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

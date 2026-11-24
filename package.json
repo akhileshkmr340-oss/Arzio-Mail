@@ -1,7 +1,7 @@
 {
   "name": "arzio-mail",
-  "version": "0.1.0",
-  "description": "Arzio Mail: an Outlook-style mail service with built-in AI assist (Phase 1)",
+  "version": "1.0.0",
+  "description": "Arzio Mail: an Outlook 365 style mail, calendar and collaboration service with built-in AI",
   "type": "module",
   "main": "src/server.js",
   "engines": {
@@ -11,7 +11,9 @@
     "start": "node --no-warnings src/server.js",
     "dev": "node --no-warnings --watch src/server.js",
     "test": "node --no-warnings --test test/*.test.js",
-    "create-admin": "node --no-warnings scripts/create-admin.js"
+    "create-admin": "node --no-warnings scripts/create-admin.js",
+    "backup": "node --no-warnings scripts/backup.js",
+    "restore": "node --no-warnings scripts/restore.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.13.0",

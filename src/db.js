@@ -355,6 +355,11 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 `);
 addColumn('users', 'calendar_feed_token', 'TEXT');
 
+// CalDAV / CardDAV: the file name a client chose for each event or contact
+addColumn('events', 'dav_name', 'TEXT');
+addColumn('contacts', 'uid', 'TEXT');
+addColumn('contacts', 'dav_name', 'TEXT');
+
 // Mail import (Gmail, Microsoft 365, any IMAP server, .eml / .mbox files)
 db.exec(`CREATE TABLE IF NOT EXISTS import_jobs (
   id INTEGER PRIMARY KEY,
@@ -421,4 +426,9 @@ export function tx(fn) {
     db.exec('ROLLBACK');
     throw e;
   }
+}
+
+export function closeDb() {
+  try { db.exec('PRAGMA optimize'); } catch { /* ignore */ }
+  try { db.close(); } catch { /* already closed */ }
 }

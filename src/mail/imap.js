@@ -855,12 +855,16 @@ function parseSearch(tokens, session) {
 
 export function startImap() {
   const c = config.imap;
+  const sockets = new Set();
   const handler = (secure) => (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
     try { new Session(socket, secure); } catch (e) { console.error('[imap]', e); socket.destroy(); }
   };
   const server = c.tls && c.tlsKey && c.tlsCert
     ? tls.createServer({ key: fs.readFileSync(c.tlsKey), cert: fs.readFileSync(c.tlsCert) }, handler(true))
     : net.createServer(handler(false));
+  server._arzioSockets = sockets;
   server.on('error', (e) => console.error('[imap] error', e.message));
   server.listen(c.port, c.host, () => console.log(`[imap] listening on ${c.host}:${c.port}${c.tls ? ' (TLS)' : ''}`));
   return server;

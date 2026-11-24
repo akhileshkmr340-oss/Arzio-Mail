@@ -1075,6 +1075,9 @@ async function openSettings(tab = 'general', ruleSeed = null) {
       <table class="kv"><tr><th>Username</th><td><code>${esc(servers.username)}</code></td></tr>
       <tr><th>Incoming (IMAP)</th><td><code>${esc(servers.imap.host)}</code> port <code>${servers.imap.port}</code>, ${esc(servers.imap.security)}</td></tr>
       <tr><th>Outgoing (SMTP)</th><td><code>${esc(servers.smtp.host)}</code> port <code>${servers.smtp.port}</code>, ${esc(servers.smtp.security)}, sign-in required</td></tr></table>
+      <h3>Calendar and contacts on your phone</h3>
+      <p class="muted">Keep your Arzio calendar and contacts in sync with iPhone, iPad and Mac (add a <strong>CalDAV</strong> and a <strong>CardDAV</strong> account), Android (DAVx⁵) or Thunderbird. Changes go both ways.</p>
+      <table class="kv"><tr><th>Server</th><td><code>${esc(location.origin)}/dav/</code></td></tr><tr><th>Username</th><td><code>${esc(servers.username)}</code></td></tr><tr><th>Password</th><td>${u.totp_enabled ? 'An app password' : 'Your password or an app password'}</td></tr></table>
       <h3>App passwords</h3>
       <table>${appPasswords.map((a) => `<tr><td>${esc(a.name)}</td><td class="muted small">created ${when(a.created_at)}, last used ${when(a.last_used)}</td><td><button class="link-btn" data-del-ap="${a.id}">Remove</button></td></tr>`).join('') || '<tr><td class="muted">None yet.</td></tr>'}</table>
       <form id="ap-form" class="row"><label>Device name<input name="name" placeholder="e.g. iPhone Mail" required></label><button class="btn">Create app password</button></form>

@@ -1,6 +1,6 @@
 // Service worker: makes Arzio Mail installable and lets the app shell open
 // offline. Mail data (/api) is never cached, so nothing private is stored here.
-const CACHE = 'arzio-shell-v3';
+const CACHE = 'arzio-shell-v4';
 const SHELL = ['/', '/index.html', '/app.js', '/styles.css', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

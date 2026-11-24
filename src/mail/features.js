@@ -169,7 +169,7 @@ export function recordContacts(userId, people) {
 /** Autocomplete: the user's contacts plus colleagues in the same private organization (directory). */
 export function suggestContacts(user, q, limit = 8) {
   const like = `%${String(q || '').toLowerCase().replace(/[%_]/g, '')}%`;
-  const own = db.prepare(`SELECT email, name, 'contact' AS source FROM contacts WHERE user_id = ? AND (lower(email) LIKE ? OR lower(name) LIKE ?)
+  const own = db.prepare(`SELECT email, name, 'contact' AS source FROM contacts WHERE user_id = ? AND email NOT LIKE '%.invalid' AND (lower(email) LIKE ? OR lower(name) LIKE ?)
     ORDER BY is_saved DESC, use_count DESC, last_used DESC LIMIT ?`).all(user.id, like, like, limit);
   let dir = [];
   if (user.org_kind === 'private') {

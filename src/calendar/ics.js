@@ -37,7 +37,7 @@ const PARTSTAT = { accepted: 'ACCEPTED', tentative: 'TENTATIVE', declined: 'DECL
  * replyFrom: for REPLY, only this attendee is included.
  */
 export function buildIcs({ method = 'REQUEST', events, prodId = '-//Arzio Mail//Calendar//EN', replyFrom }) {
-  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:${prodId}`, 'CALSCALE:GREGORIAN', `METHOD:${method}`];
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:${prodId}`, 'CALSCALE:GREGORIAN', ...(method ? [`METHOD:${method}`] : [])];
   for (const e of events) {
     lines.push('BEGIN:VEVENT');
     lines.push(`UID:${e.uid}`);
@@ -63,6 +63,9 @@ export function buildIcs({ method = 'REQUEST', events, prodId = '-//Arzio Mail//
     }
     lines.push(`STATUS:${method === 'CANCEL' || e.cancelled ? 'CANCELLED' : 'CONFIRMED'}`);
     lines.push(`TRANSP:${e.show_as === 'free' ? 'TRANSPARENT' : 'OPAQUE'}`);
+    if (!method && Number.isFinite(e.reminder_minutes) && e.reminder_minutes !== null) {
+      lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${escText(e.title)}`, `TRIGGER:-PT${e.reminder_minutes}M`, 'END:VALARM');
+    }
     lines.push('END:VEVENT');
   }
   lines.push('END:VCALENDAR');
@@ -117,7 +120,12 @@ export function parseIcs(text) {
     if (key === 'BEGIN') { depth++; continue; } // nested VALARM etc.
     if (key === 'END' && value.toUpperCase() === 'VEVENT') { events.push(cur); cur = null; continue; }
     if (key === 'END') { depth--; continue; }
-    if (depth > 0) continue;
+    if (depth > 0) {
+      // First alarm becomes the event reminder
+      const t = key === 'TRIGGER' && cur.reminder_minutes === undefined && value.trim().match(/^-P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?/);
+      if (t) cur.reminder_minutes = (+t[1] || 0) * 1440 + (+t[2] || 0) * 60 + (+t[3] || 0);
+      continue;
+    }
     switch (key) {
       case 'UID': cur.uid = value.trim(); break;
       case 'SUMMARY': cur.title = unescText(value); break;

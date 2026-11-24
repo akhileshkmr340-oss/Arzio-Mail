@@ -1,0 +1,13 @@
+# Nightly backup at 02:30 server time.
+#   sudo cp deploy/systemd/arzio-backup.* /etc/systemd/system/
+#   sudo systemctl enable --now arzio-backup.timer
+[Unit]
+Description=Nightly Arzio Mail backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

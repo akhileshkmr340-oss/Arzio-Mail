@@ -1,0 +1,12 @@
+[Unit]
+Description=Arzio Mail backup
+After=arzio-mail.service
+
+[Service]
+Type=oneshot
+User=arzio
+WorkingDirectory=/opt/arzio/app
+Environment=ARZIO_DATA_DIR=/opt/arzio/data
+ExecStart=/usr/bin/node --no-warnings scripts/backup.js --out /opt/arzio/backups --keep 14
+ProtectSystem=strict
+ReadWritePaths=/opt/arzio/backups /opt/arzio/data

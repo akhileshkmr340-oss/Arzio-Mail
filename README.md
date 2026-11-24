@@ -20,11 +20,13 @@ It has built-in AI (Claude by default): thread summaries with action items, repl
 | AI | Summarize, draft and rewrite, triage, writing coach, "Ask Arzio" questions over your mailbox, meeting prep briefs. Claude by default, pluggable; a basic built-in fallback works without a key |
 | AI agents | MCP server at `/mcp` so assistants such as Claude can search and read mail, send, create events and tasks with a personal API token (read-only or read-and-act) |
 | Mail apps | IMAP server and SMTP submission, so Outlook desktop, Apple Mail, Thunderbird and phone mail apps work; app passwords for accounts with two-step verification |
+| Phone sync | CalDAV and CardDAV: calendar and contacts sync both ways with iPhone, iPad, Mac, Android (DAVx⁵) and Thunderbird |
 | Install | Installable web app (PWA) on Windows, Mac, Android and iPhone, with reminders as notifications |
 | Tenants | Public tenant with open signup; private organizations with custom domains and DNS verification |
 | Admin center | Users, shared mailboxes (support@, info@), groups / distribution lists, domains, mail flow rules with data loss prevention (card, Aadhaar, PAN, IBAN, SSN), message trace, audit log, usage reports |
 | Compliance | Retention policies, litigation hold (deleted mail kept hidden), eDiscovery search across all mailboxes with .mbox export |
 | Migration | Import from Gmail, Outlook / Microsoft 365, Yahoo, Zoho or any IMAP account in the background; .mbox (Google Takeout) and .eml upload |
+| Operations | `/health`, `/ready` and Prometheus `/metrics`; graceful shutdown; live backups with rotation and a checked restore; Docker, nginx and systemd kit |
 | Security | scrypt passwords, two-step verification (authenticator apps), HttpOnly sessions, rate limits, SPF/DKIM/DMARC checks and spam scoring on inbound mail, sandboxed HTML mail, CSP, audit log |
 
 ## Run it locally
@@ -52,7 +54,7 @@ Create a service admin (can create private organizations):
 npm run create-admin -- admin 'a-strong-password' "Arzio Admin"
 ```
 
-Run the tests: `npm test`.
+Run the tests: `npm test` (32 tests).
 
 ### Connecting a mail app
 
@@ -60,48 +62,64 @@ In development IMAP listens on port 1143 and SMTP submission on 1587 without TLS
 
 ### Connecting an AI assistant (MCP)
 
-Create a token in **Settings > Mail apps & AI agents**, then add `https://mail.arzio.com/mcp` as a remote MCP server with the header `Authorization: Bearer <token>`. Tools: `list_folders`, `search_mail`, `read_message`, `list_events`, `list_tasks`, and with a read-and-act token `send_mail`, `create_event`, `create_task`, `complete_task`.
+Create a token in **Settings > Mail apps & AI agents**, then add `https://mail.arzio.com/mcp` as a remote MCP server with the header `Authorization: Bearer <token>`. Tools: `list_folders`, `search_mail`, `read_message`, `list_events`, `list_tasks`, and with a read-and-act token `send_mail`, `create_event`, `create_task`, `complete_task`. The same token works with the REST API: see [docs/API.md](docs/API.md).
+
+### Calendar and contacts on a phone
+
+Add a CalDAV account and a CardDAV account with server `https://mail.arzio.com/dav/` (apps also find it from just `mail.arzio.com`), your address and your password or an app password.
 
 ## Production setup (SES/Postmark out, own inbound)
 
-1. **Server:** a VM with a public IP, ports 25 (SMTP) and 443 (HTTPS via nginx or a load balancer) open. Run with Docker (`docker build -t arzio-mail .`) or `npm start` under systemd. Keep `/data` on a persistent disk and back it up.
-2. **DNS for arzio.com:**
-   - `A mail.arzio.com` and `A mx.arzio.com` pointing at the server.
-   - `MX arzio.com 10 mx.arzio.com`.
-   - SPF: `TXT arzio.com "v=spf1 include:amazonses.com ~all"` (Postmark: `include:spf.mtasv.net`).
-   - DKIM: the CNAME/TXT records SES or Postmark gives you when you verify the domain.
-   - DMARC: `TXT _dmarc.arzio.com "v=DMARC1; p=quarantine; rua=mailto:dmarc@arzio.com"`.
-3. **Outbound:** verify `arzio.com` in SES (and request production access to leave the sandbox) or in Postmark, create SMTP credentials, and set `OUTBOUND_TRANSPORT=relay`, `SMTP_RELAY_HOST/PORT/USER/PASS`.
-4. **Inbound:** set `INBOUND_SMTP_PORT=25` and point `INBOUND_TLS_KEY/CERT` at a certificate for `mx.arzio.com` (Let's Encrypt) so senders can use STARTTLS.
-5. **HTTPS:** put nginx or a load balancer in front of port 3000 and set `SECURE_COOKIES=true`, `TRUST_PROXY=true`.
-6. **Private organizations:** the service admin creates the organization in **Service admin**. The organization admin signs in, opens **Organization admin**, adds the TXT, MX, SPF and DMARC records shown there, clicks **Check DNS**, then adds users. Each custom domain also needs to be verified in SES/Postmark for sending.
+The full guide is [docs/DEPLOY.md](docs/DEPLOY.md): DNS records, SES or Postmark, certificates, and install with Docker Compose (`deploy/docker-compose.yml` with nginx) or systemd (`deploy/systemd/`). Running it day to day, monitoring, backups, restore and the plan for growing past one server are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+Short version:
+
+```bash
+cp .env.example deploy/.env      # domain, relay credentials, AI key, TLS paths
+docker compose -f deploy/docker-compose.yml up -d --build
+curl https://mail.arzio.com/ready
+```
+
+Private organizations: the service admin creates the organization in **Service admin**. The organization admin opens the **Admin center**, adds the TXT, MX, SPF and DMARC records shown under **Domains**, clicks **Check DNS**, then adds users. Each custom domain also needs to be verified in SES/Postmark for sending.
 
 ## Code layout
 
 ```
 src/
-  server.js            HTTP server, security headers, starts inbound SMTP
-  config.js            all settings (environment variables)
-  db.js                SQLite schema: organizations, domains, users, folders, messages, attachments, FTS index
-  auth.js              accounts, passwords, sessions, tenant-aware user creation
-  routes/api.js        REST API (mail, folders, drafts, AI, org admin, service admin, inbound webhooks)
-  mail/store.js        mailbox storage, threading, search
-  mail/delivery.js     inbound delivery of raw MIME, outbound sending, local delivery
-  mail/smtp-inbound.js MX server
-  ai/index.js          AI service facade
-  ai/anthropic.js      Claude provider (structured outputs, refusal fallback)
-  ai/heuristic.js      built-in fallback when no AI key is set
-public/                web client (index.html, app.js, styles.css)
-scripts/create-admin.js
-test/api.test.js
+  server.js              HTTP server, security headers, starts SMTP/IMAP, graceful shutdown
+  config.js              all settings (environment variables)
+  db.js                  SQLite schema and upgrades
+  auth.js                accounts, passwords, sessions, app passwords, API tokens
+  health.js              /health, /ready, /metrics
+  dav.js                 CalDAV and CardDAV
+  mcp.js                 MCP server for AI agents
+  audit.js, mfa.js, maintenance.js
+  routes/api.js          mail, folders, drafts, AI, org and service admin, inbound webhooks
+  routes/features.js     rules, templates, contacts, senders, aliases, delegates, preferences
+  routes/calendar.js     calendar, To Do, notifications, app passwords, tokens
+  routes/admin.js        admin center: shared mailboxes, groups, mail flow, trace, compliance, import
+  mail/store.js          mailbox storage, threading, search, litigation hold
+  mail/delivery.js       inbound delivery, outbound sending, queue, local delivery
+  mail/smtp-inbound.js   MX server
+  mail/smtp-submission.js SMTP for mail apps
+  mail/imap.js           IMAP server
+  mail/import.js         import from other accounts and files
+  mail/transport-rules.js mail flow rules and data loss prevention
+  calendar/              events, invitations (iMIP), recurrence, iCalendar
+  ai/                    AI facade, Claude provider, built-in fallback
+public/                  web app (PWA)
+scripts/                 create-admin, backup, restore
+deploy/                  docker-compose, nginx, systemd, certificate hook
+docs/                    DEPLOY, OPERATIONS, API
+test/                    32 end-to-end tests
 ```
 
 ## Known limits
 
-- SQLite on one server: fine for early users; move to PostgreSQL and object storage before large scale.
+- SQLite on one server: fine for a few thousand mailboxes. The move to object storage and PostgreSQL is planned step by step in [docs/OPERATIONS.md](docs/OPERATIONS.md#growing-past-one-server).
 - Virus scanning of attachments is not built in; add ClamAV at the MX for production.
 - Native iOS and Android apps are not included. Phones use the installable web app, or their built-in mail app over IMAP.
-- Exchange ActiveSync and EWS are not supported; Outlook desktop connects over IMAP.
+- Exchange ActiveSync and EWS are not supported; Outlook desktop connects over IMAP, and phones sync calendar and contacts over CalDAV/CardDAV.
 - S/MIME and Microsoft Purview-style message encryption are not built in. Mail is protected in transit with TLS (set the TLS certificates) and access is controlled by sign-in and two-step verification.
 - Microsoft 365 work accounts can only be imported if their admin allows IMAP with basic sign-in; otherwise export to .pst/.mbox first.
 - Online meetings: events take a meeting link (Teams, Zoom, Meet, Jitsi), but Arzio has no video service of its own.
