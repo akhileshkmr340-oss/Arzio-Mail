@@ -37,6 +37,7 @@ test('signup, send, receive, thread, search, AI', async () => {
   assert.equal((await alice('/auth/signup', { username: 'alice', name: 'Alice', password: 'password123' })).status, 201);
   assert.equal((await bob('/auth/signup', { username: 'bob', name: 'Bob', password: 'password123' })).status, 201);
   assert.equal((await bob('/auth/signup', { username: 'admin', name: 'X', password: 'password123' })).status, 400, 'reserved name');
+  for (const c of [alice, bob]) await c('/me/preferences', { undo_send_seconds: 0 }, 'PATCH');
 
   const sent = await alice('/send', { to: 'bob@arzio.test, someone@example.com', subject: 'Lunch plan', text: 'Can you join lunch on Friday?' });
   assert.deepEqual(sent.data.deliveredLocally, ['bob@arzio.test']);
@@ -79,6 +80,7 @@ test('private organization lifecycle', async () => {
 
   const pub = client();
   await pub('/auth/signup', { username: 'carol', password: 'password123' });
+  await pub('/me/preferences', { undo_send_seconds: 0 }, 'PATCH');
   assert.equal((await pub('/org/users')).status, 403, 'public users have no org admin');
   const r = await pub('/send', { to: 'meena@acme.example', subject: 'Hi', text: 'Hello Meena' });
   assert.deepEqual(r.data.deliveredLocally, ['meena@acme.example'], 'mail between tenants is delivered locally');

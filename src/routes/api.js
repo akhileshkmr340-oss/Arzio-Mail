@@ -12,6 +12,8 @@ import {
 import * as store from '../mail/store.js';
 import { sendMail, deliverRaw, parseRecipients } from '../mail/delivery.js';
 import * as ai from '../ai/index.js';
+import { audit } from '../audit.js';
+import { features } from './features.js';
 
 export const api = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -44,10 +46,11 @@ api.post('/auth/signup', wrap(async (req, res) => {
 }));
 
 api.post('/auth/login', wrap(async (req, res) => {
-  const { email, password } = req.body || {};
+  const { email, password, code } = req.body || {};
   rateLimit(`login:${req.ip}`, 20, 15 * 60e3);
   rateLimit(`login-acct:${String(email).toLowerCase()}`, 10, 15 * 60e3);
-  const s = login(email, password);
+  const s = login(email, password, code);
+  audit(s.userId, 'auth.login', { ip: req.ip });
   res.setHeader('Set-Cookie', sessionCookie(s.token, s.expires));
   res.json({ ok: true });
 }));
@@ -90,6 +93,20 @@ api.post('/inbound/postmark', express.json({ limit: '40mb' }), wrap(async (req, 
 // Everything below requires a signed-in user
 api.use(requireAuth);
 
+// Which mailbox is this request about? Your own by default; a shared or
+// delegated mailbox when X-Arzio-Mailbox names one you have access to.
+api.use((req, res, next) => {
+  req.mbx = req.user.id;
+  const target = Number(req.headers['x-arzio-mailbox'] || 0);
+  if (target && target !== req.user.id) {
+    const d = db.prepare('SELECT permission FROM delegates WHERE owner_id = ? AND delegate_id = ?').get(target, req.user.id);
+    if (!d) return res.status(403).json({ error: 'You do not have access to that mailbox.' });
+    if (d.permission === 'read' && req.method !== 'GET') return res.status(403).json({ error: 'You have read-only access to that mailbox.' });
+    req.mbx = target;
+  }
+  next();
+});
+
 api.get('/me', (req, res) => {
   res.json({ user: req.user, usage: { bytes: store.mailboxUsage(req.user.id), quota: config.quotas.mailboxBytes } });
 });
@@ -110,60 +127,60 @@ api.patch('/me', wrap(async (req, res) => {
 }));
 
 // ------------------------------------------------------------ folders
-api.get('/folders', (req, res) => res.json({ folders: store.listFolders(req.user.id) }));
-api.post('/folders', wrap(async (req, res) => res.status(201).json({ folder: store.createFolder(req.user.id, req.body?.name) })));
-api.patch('/folders/:id', wrap(async (req, res) => res.json({ folder: store.renameFolder(req.user.id, req.params.id, req.body?.name) })));
-api.delete('/folders/:id', wrap(async (req, res) => { store.deleteFolder(req.user.id, req.params.id); res.json({ ok: true }); }));
+api.get('/folders', (req, res) => res.json({ folders: store.listFolders(req.mbx) }));
+api.post('/folders', wrap(async (req, res) => res.status(201).json({ folder: store.createFolder(req.mbx, req.body?.name) })));
+api.patch('/folders/:id', wrap(async (req, res) => res.json({ folder: store.renameFolder(req.mbx, req.params.id, req.body?.name) })));
+api.delete('/folders/:id', wrap(async (req, res) => { store.deleteFolder(req.mbx, req.params.id); res.json({ ok: true }); }));
 
 // ------------------------------------------------------------ messages
 api.get('/messages', (req, res) => {
-  const { folder, focus, q, offset, limit, flagged } = req.query;
-  res.json({ messages: store.listMessages(req.user.id, { folderId: folder, focus, q, offset, limit, flagged: flagged === '1' }) });
+  const { folder, focus, q, offset, limit, flagged, snoozed, category, unread } = req.query;
+  res.json({ messages: store.listMessages(req.mbx, { folderId: folder, focus, q, offset, limit, flagged: flagged === '1', snoozed: snoozed === '1', category, unread: unread === '1' }) });
 });
 
 api.get('/messages/:id', (req, res) => {
-  const m = store.getMessage(req.user.id, req.params.id);
+  const m = store.getMessage(req.mbx, req.params.id);
   if (!m) return res.status(404).json({ error: 'Message not found.' });
-  if (!m.is_read) { store.updateMessage(req.user.id, m.id, { is_read: true }); m.is_read = true; }
+  if (!m.is_read) { store.updateMessage(req.mbx, m.id, { is_read: true }); m.is_read = true; }
   res.json({ message: m });
 });
 
 api.get('/threads/:threadId', (req, res) => {
-  const messages = store.getThread(req.user.id, req.params.threadId);
+  const messages = store.getThread(req.mbx, req.params.threadId);
   res.json({ messages: messages.map((m) => ({ ...m, attachments: db.prepare('SELECT id, filename, content_type, size FROM attachments WHERE message_id = ?').all(m.id) })) });
 });
 
 api.patch('/messages/:id', wrap(async (req, res) => {
-  const m = store.updateMessage(req.user.id, req.params.id, req.body || {});
+  const m = store.updateMessage(req.mbx, req.params.id, req.body || {});
   if (!m) return res.status(404).json({ error: 'Message not found.' });
   res.json({ message: m });
 }));
 
 api.delete('/messages/:id', (req, res) => {
-  if (!store.deleteMessage(req.user.id, req.params.id)) return res.status(404).json({ error: 'Message not found.' });
+  if (!store.deleteMessage(req.mbx, req.params.id)) return res.status(404).json({ error: 'Message not found.' });
   res.json({ ok: true });
 });
 
 // Bulk actions: read, unread, flag, unflag, delete, move (folder_id), archive, junk
 api.post('/messages/bulk', wrap(async (req, res) => {
   const { ids = [], action, folder_id } = req.body || {};
-  const roleFolder = (role) => store.folderByRole(req.user.id, role).id;
+  const roleFolder = (role) => store.folderByRole(req.mbx, role).id;
   for (const id of ids.slice(0, 500)) {
-    if (action === 'delete') store.deleteMessage(req.user.id, id);
-    else if (action === 'read') store.updateMessage(req.user.id, id, { is_read: true });
-    else if (action === 'unread') store.updateMessage(req.user.id, id, { is_read: false });
-    else if (action === 'flag') store.updateMessage(req.user.id, id, { is_flagged: true });
-    else if (action === 'unflag') store.updateMessage(req.user.id, id, { is_flagged: false });
-    else if (action === 'archive') store.updateMessage(req.user.id, id, { folder_id: roleFolder('archive') });
-    else if (action === 'junk') store.updateMessage(req.user.id, id, { folder_id: roleFolder('junk') });
-    else if (action === 'move') store.updateMessage(req.user.id, id, { folder_id });
+    if (action === 'delete') store.deleteMessage(req.mbx, id);
+    else if (action === 'read') store.updateMessage(req.mbx, id, { is_read: true });
+    else if (action === 'unread') store.updateMessage(req.mbx, id, { is_read: false });
+    else if (action === 'flag') store.updateMessage(req.mbx, id, { is_flagged: true });
+    else if (action === 'unflag') store.updateMessage(req.mbx, id, { is_flagged: false });
+    else if (action === 'archive') store.updateMessage(req.mbx, id, { folder_id: roleFolder('archive') });
+    else if (action === 'junk') store.updateMessage(req.mbx, id, { folder_id: roleFolder('junk') });
+    else if (action === 'move') store.updateMessage(req.mbx, id, { folder_id });
     else throw httpError(400, 'Unknown action.');
   }
   res.json({ ok: true });
 }));
 
 api.get('/attachments/:id', (req, res) => {
-  const a = store.getAttachment(req.user.id, req.params.id);
+  const a = store.getAttachment(req.mbx, req.params.id);
   if (!a) return res.status(404).json({ error: 'Attachment not found.' });
   res.setHeader('Content-Type', a.content_type);
   res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(a.filename)}`);
@@ -172,7 +189,11 @@ api.get('/attachments/:id', (req, res) => {
 });
 
 // ------------------------------------------------------------ compose
-api.post('/send', wrap(async (req, res) => res.json(await sendMail(req.user, req.body || {}))));
+api.post('/send', wrap(async (req, res) => {
+  const body = { ...(req.body || {}) };
+  if (req.mbx !== req.user.id && !body.from) body.from = db.prepare('SELECT email FROM users WHERE id = ?').get(req.mbx).email;
+  res.json(await sendMail(req.user, body));
+}));
 
 // Save (create or replace) a draft
 api.post('/drafts', wrap(async (req, res) => {
@@ -198,9 +219,9 @@ function requireAi(req) {
 
 api.post('/ai/summarize', wrap(async (req, res) => {
   requireAi(req);
-  const m = store.getMessage(req.user.id, req.body?.messageId);
+  const m = store.getMessage(req.mbx, req.body?.messageId);
   if (!m) throw httpError(404, 'Message not found.');
-  const messages = req.body?.thread === false ? [m] : store.getThread(req.user.id, m.thread_id);
+  const messages = req.body?.thread === false ? [m] : store.getThread(req.mbx, m.thread_id);
   const result = await ai.summarize(messages);
   store.saveAi(m.id, { ai_summary: result.summary });
   res.json({ ...result, provider: ai.aiInfo().provider });
@@ -211,9 +232,9 @@ api.post('/ai/draft', wrap(async (req, res) => {
   const { messageId, instructions, tone } = req.body || {};
   let messages = [];
   if (messageId) {
-    const m = store.getMessage(req.user.id, messageId);
+    const m = store.getMessage(req.mbx, messageId);
     if (!m) throw httpError(404, 'Message not found.');
-    messages = store.getThread(req.user.id, m.thread_id);
+    messages = store.getThread(req.mbx, m.thread_id);
   }
   res.json(await ai.draft({ messages, instructions, tone, user: req.user }));
 }));
@@ -225,12 +246,14 @@ api.post('/ai/rewrite', wrap(async (req, res) => {
 
 api.post('/ai/triage', wrap(async (req, res) => {
   requireAi(req);
-  const m = store.getMessage(req.user.id, req.body?.messageId);
+  const m = store.getMessage(req.mbx, req.body?.messageId);
   if (!m) throw httpError(404, 'Message not found.');
   const t = await ai.triage(m);
   store.saveAi(m.id, { ai_priority: t.priority, ai_category: t.category, ai_needs_reply: !!t.needsReply, is_focused: t.focused !== false });
   res.json(t);
 }));
+
+api.use(features);
 
 // ------------------------------------------------------------ organization admin (private tenants)
 function orgIdFor(req) {

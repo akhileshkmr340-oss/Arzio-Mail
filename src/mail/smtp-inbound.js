@@ -31,7 +31,9 @@ export function startInboundSmtp() {
         if (stream.sizeExceeded) return callback(Object.assign(new Error('Message too large'), { responseCode: 552 }));
         try {
           const raw = Buffer.concat(chunks);
-          const delivered = await deliverRaw(raw, session.envelope.rcptTo.map((r) => r.address));
+          const delivered = await deliverRaw(raw, session.envelope.rcptTo.map((r) => r.address), {
+            ip: session.remoteAddress, helo: session.hostNameAppearsAs, mailFrom: session.envelope.mailFrom?.address || '',
+          });
           if (!delivered.length) return callback(Object.assign(new Error('Mailbox unavailable or full'), { responseCode: 452 }));
           callback(null, 'Message accepted');
         } catch (e) {

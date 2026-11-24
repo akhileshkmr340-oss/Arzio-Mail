@@ -38,6 +38,38 @@ const DRAFT_SCHEMA = {
   additionalProperties: false,
 };
 
+const COACH_SCHEMA = {
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: ['ready', 'review'] },
+    tone: { type: 'string', description: 'How the email will likely come across, a few words' },
+    suggestions: { type: 'array', items: { type: 'string' }, description: 'At most 4 specific, actionable suggestions' },
+  },
+  required: ['verdict', 'tone', 'suggestions'],
+  additionalProperties: false,
+};
+
+const ASK_SCHEMA = {
+  type: 'object',
+  properties: {
+    answer: { type: 'string' },
+    citedIds: { type: 'array', items: { type: 'integer' }, description: 'ids of the [#id] emails the answer relies on' },
+  },
+  required: ['answer', 'citedIds'],
+  additionalProperties: false,
+};
+
+const BRIEF_SCHEMA = {
+  type: 'object',
+  properties: {
+    brief: { type: 'string', description: '2 to 4 sentences: what the meeting is about and the latest state' },
+    openQuestions: { type: 'array', items: { type: 'string' } },
+    citedIds: { type: 'array', items: { type: 'integer' } },
+  },
+  required: ['brief', 'openQuestions', 'citedIds'],
+  additionalProperties: false,
+};
+
 export function anthropicProvider(model) {
   const client = new Anthropic();
 
@@ -91,6 +123,25 @@ export function anthropicProvider(model) {
       const styles = { improve: 'clearer and more polished', shorten: 'about half as long, keeping every key point', formal: 'more formal', friendly: 'warmer and more friendly' };
       return ask({
         prompt: `Rewrite the email text below to be ${styles[style] || styles.improve}. Keep the meaning and the language. Return only the rewritten text.\n\n<text>\n${text}\n</text>`,
+      });
+    },
+    async coach({ text, recipients }) {
+      return ask({
+        schema: COACH_SCHEMA,
+        effort: 'low',
+        prompt: `Review this email draft before it is sent to ${recipients || 'the recipients'}. Check tone, clarity, missing information (dates, attachments mentioned but not attached, unanswered questions) and anything that may land badly. verdict = "ready" if it is fine to send as is.\n\n<draft>\n${text}\n</draft>`,
+      });
+    },
+    async ask({ question, context }) {
+      return ask({
+        schema: ASK_SCHEMA,
+        prompt: `Answer the mailbox owner's question using only the emails below. If they do not contain the answer, say so plainly. Mention dates and people where useful.\n\nQuestion: ${question}\n\n<emails>\n${context || '(no matching emails)'}\n</emails>`,
+      });
+    },
+    async meetingBrief({ event, context }) {
+      return ask({
+        schema: BRIEF_SCHEMA,
+        prompt: `Prepare the mailbox owner for this meeting.\nTitle: ${event.title}\nWhen: ${event.start}\nAttendees: ${(event.attendees || []).map((a) => a.email).join(', ')}\nDescription: ${event.description || ''}\n\nRelated emails:\n<emails>\n${context || '(none found)'}\n</emails>`,
       });
     },
     async triage(message) {

@@ -7,6 +7,8 @@ import { ensurePublicTenant } from './db.js';
 import { api } from './routes/api.js';
 import { startInboundSmtp } from './mail/smtp-inbound.js';
 import { aiInfo } from './ai/index.js';
+import { startWorkers } from './mail/delivery.js';
+import { startMaintenance } from './maintenance.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 ensurePublicTenant(config.primaryDomain, config.serviceName);
@@ -45,7 +47,7 @@ app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(here, '..', 'publ
 app.use((err, req, res, next) => {
   const status = err.status || err.statusCode || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: status >= 500 && !err.expose && status !== 502 ? 'Something went wrong.' : err.message });
+  res.status(status).json({ error: status >= 500 && !err.expose && status !== 502 ? 'Something went wrong.' : err.message, ...(err.mfaRequired ? { mfaRequired: true } : {}) });
 });
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -54,4 +56,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(`[ai] provider: ${aiInfo().provider}${aiInfo().model ? ` (${aiInfo().model})` : ''}  [outbound] ${config.outbound.transport}`);
   });
   if (config.inbound.smtpEnabled) startInboundSmtp();
+  startWorkers();
+  startMaintenance();
 }

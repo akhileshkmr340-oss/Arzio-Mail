@@ -3,6 +3,7 @@
 import crypto from 'node:crypto';
 import { db, SYSTEM_FOLDERS, tx, ensurePublicTenant } from './db.js';
 import { config } from './config.js';
+import { verifyTotp } from './mfa.js';
 
 const SESSION_DAYS = 30;
 export const COOKIE = 'arzio_session';
@@ -81,7 +82,7 @@ export function createUser({ username, name, password, ip, orgId, domain, role =
 }
 
 export function getUser(id) {
-  return db.prepare('SELECT u.id, u.org_id, u.role, u.email, u.name, u.is_admin, u.is_disabled, u.ai_enabled, u.signature, u.created_at, o.name AS org_name, o.kind AS org_kind FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.id = ?').get(id);
+  return db.prepare('SELECT u.id, u.org_id, u.role, u.email, u.name, u.is_admin, u.is_disabled, u.ai_enabled, u.signature, u.created_at, u.totp_enabled, u.ooo_enabled, u.ooo_subject, u.ooo_message, u.ooo_start, u.ooo_end, u.undo_send_seconds, u.focused_inbox, o.name AS org_name, o.kind AS org_kind FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.id = ?').get(id);
 }
 
 export function findUserByEmail(email) {
@@ -90,7 +91,7 @@ export function findUserByEmail(email) {
 
 const DUMMY_HASH = hashPassword(crypto.randomBytes(16).toString('hex'));
 
-export function login(emailOrUser, password) {
+export function login(emailOrUser, password, totpCode) {
   let email = String(emailOrUser || '').trim().toLowerCase();
   if (!email.includes('@')) email = `${email}@${config.primaryDomain}`;
   const u = findUserByEmail(email);
@@ -98,6 +99,11 @@ export function login(emailOrUser, password) {
   const ok = verifyPassword(String(password || ''), u ? u.password_hash : DUMMY_HASH);
   if (!u || !ok) throw httpError(401, 'Wrong email or password.');
   if (u.is_disabled) throw httpError(403, 'This account is disabled.');
+  if (u.mailbox_type === 'shared') throw httpError(403, 'Shared mailboxes cannot sign in. Open them from your own account.');
+  if (u.totp_enabled) {
+    if (!totpCode) throw Object.assign(httpError(401, 'Enter the 6-digit code from your authenticator app.'), { mfaRequired: true });
+    if (!verifyTotp(u.totp_secret, totpCode)) throw Object.assign(httpError(401, 'That code is not valid. Try the latest code.'), { mfaRequired: true });
+  }
   return createSession(u.id);
 }
 
@@ -105,7 +111,7 @@ export function createSession(userId) {
   const token = crypto.randomBytes(32).toString('base64url');
   const expires = new Date(Date.now() + SESSION_DAYS * 86400e3).toISOString();
   db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
-  return { token, expires };
+  return { token, expires, userId };
 }
 
 export function destroySession(token) {

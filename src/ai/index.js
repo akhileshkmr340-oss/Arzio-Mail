@@ -55,3 +55,23 @@ export async function rewrite({ text, style }) {
 export async function triage(message) {
   return provider.triage(formatMessage(message).slice(0, 8000));
 }
+
+/** Coaching: review a draft before sending. Returns { verdict, tone, suggestions[] } */
+export async function coach({ text, recipients }) {
+  return provider.coach({ text: String(text).slice(0, 20000), recipients: String(recipients || '') });
+}
+
+/**
+ * Ask your mailbox: answer a question using the user's own messages.
+ * sources: messages found by search (most relevant first). Returns { answer, citedIds[] }
+ */
+export async function ask({ question, sources }) {
+  const ctx = sources.map((m) => `[#${m.id}] ${formatMessage(m).slice(0, 3000)}`).join('\n\n---\n\n').slice(0, MAX_INPUT_CHARS);
+  return provider.ask({ question: String(question).slice(0, 1000), context: ctx, sources });
+}
+
+/** Meeting prep: brief the user before an event using related mail. */
+export async function meetingBrief({ event, sources }) {
+  const ctx = sources.map((m) => `[#${m.id}] ${formatMessage(m).slice(0, 2500)}`).join('\n\n---\n\n').slice(0, MAX_INPUT_CHARS);
+  return provider.meetingBrief({ event, context: ctx, sources });
+}

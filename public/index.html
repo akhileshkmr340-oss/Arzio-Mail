@@ -16,6 +16,7 @@
         <h1>Sign in</h1>
         <label>Email or username<input name="email" autocomplete="username" required></label>
         <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+        <label class="hidden" id="mfa-row">Verification code<input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code from your authenticator app"></label>
         <p class="form-error" role="alert"></p>
         <button class="btn primary wide" type="submit">Sign in</button>
         <p class="muted center signup-link">New here? <a href="#" data-auth="signup">Create a free account</a></p>
@@ -43,6 +44,7 @@
         <input id="search-input" type="search" placeholder="Search mail and people" aria-label="Search">
       </form>
       <div class="top-actions">
+        <button class="btn ai ask-btn" id="ask-btn" title="Ask questions about your mail">&#10024; Ask Arzio</button>
         <span class="ai-badge" id="ai-badge" title="AI provider"></span>
         <button class="icon-btn" id="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
         <div class="avatar-menu">
@@ -64,7 +66,15 @@
         <ul class="folders" id="folder-list"></ul>
         <ul class="folders smart">
           <li><button data-smart="flagged">&#9873; Flagged</button></li>
+          <li><button data-smart="snoozed">&#9200; Snoozed</button></li>
+          <li><button data-smart="scheduled">&#128339; Scheduled</button></li>
         </ul>
+        <ul class="folders smart">
+          <li><button data-view="calendar">&#128197; Calendar</button></li>
+          <li><button data-view="people">&#128101; People</button></li>
+          <li><button data-view="tasks">&#9745; To Do</button></li>
+        </ul>
+        <div id="mailbox-switch" class="mailbox-switch hidden"></div>
         <button class="link-btn" id="new-folder-btn">+ New folder</button>
         <div class="usage" id="usage"></div>
       </nav>
@@ -80,6 +90,8 @@
         <ul class="msg-list" id="msg-list" aria-live="polite"></ul>
         <button class="link-btn more hidden" id="load-more">Load more</button>
       </section>
+
+      <section class="full-pane hidden" id="full-pane"></section>
 
       <section class="read-pane" id="read-pane">
         <div class="empty-state" id="empty-state">

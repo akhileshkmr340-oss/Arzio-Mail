@@ -65,6 +65,21 @@ export const heuristicProvider = {
     if (style === 'shorten') return sentences(text).slice(0, Math.max(1, Math.ceil(sentences(text).length / 2))).join(' ');
     return text;
   },
+  async coach({ text }) {
+    const suggestions = [];
+    if (/attach/i.test(text)) suggestions.push('You mention an attachment. Check that it is attached.');
+    if (text.length > 2500) suggestions.push('This is long. Consider a short summary at the top.');
+    if (/[A-Z]{6,}/.test(text)) suggestions.push('Words in all caps can read as shouting.');
+    if (!/\b(hi|hello|dear|hey)\b/i.test(text.slice(0, 80))) suggestions.push('Consider adding a greeting.');
+    return { verdict: suggestions.length ? 'review' : 'ready', tone: 'not analyzed (basic mode)', suggestions };
+  },
+  async ask({ sources }) {
+    if (!sources.length) return { answer: 'I could not find any emails about that.', citedIds: [] };
+    return { answer: `Here are the ${Math.min(sources.length, 5)} most relevant emails I found. Connect an AI provider for direct answers.`, citedIds: sources.slice(0, 5).map((m) => m.id) };
+  },
+  async meetingBrief({ event, sources }) {
+    return { brief: `${event.title} with ${(event.attendees || []).length} attendee(s). ${sources.length} related email(s) found.`, openQuestions: [], citedIds: sources.slice(0, 5).map((m) => m.id) };
+  },
   async triage(message) {
     const from = headerOf(message, 'From');
     const subject = headerOf(message, 'Subject');

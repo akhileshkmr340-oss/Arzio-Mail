@@ -133,7 +133,7 @@ export function storeMessage(userId, msg) {
 }
 
 const LIST_COLS = `id, folder_id, thread_id, from_addr, from_name, to_json, subject, snippet, date, is_read, is_flagged, is_pinned,
-  is_focused, categories_json, has_attachments, ai_priority, ai_category, ai_needs_reply`;
+  is_focused, categories_json, has_attachments, ai_priority, ai_category, ai_needs_reply, snooze_until, spam_score`;
 
 function hydrate(row) {
   if (!row) return row;
@@ -146,7 +146,7 @@ function hydrate(row) {
   return out;
 }
 
-export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 0, flagged }) {
+export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 0, flagged, snoozed, category, unread }) {
   const where = ['m.user_id = ?'];
   const args = [userId];
   let from = 'messages m';
@@ -158,6 +158,10 @@ export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 
   }
   if (folderId) { where.push('m.folder_id = ?'); args.push(Number(folderId)); }
   if (flagged) where.push('m.is_flagged = 1');
+  if (snoozed) where.push('m.snooze_until IS NOT NULL');
+  else where.push('m.snooze_until IS NULL');
+  if (category) { where.push("m.categories_json LIKE ?"); args.push(`%${JSON.stringify(String(category)).slice(1, -1)}%`); }
+  if (unread) where.push('m.is_read = 0');
   if (focus === 'focused') where.push('m.is_focused = 1');
   if (focus === 'other') where.push('m.is_focused = 0');
   const sql = `SELECT ${LIST_COLS.split(',').map((c) => 'm.' + c.trim()).join(', ')} FROM ${from}
@@ -197,6 +201,7 @@ export function updateMessage(userId, id, patch) {
   const flag = (k, col) => { if (k in patch) { sets.push(`${col} = ?`); args.push(patch[k] ? 1 : 0); } };
   flag('is_read', 'is_read'); flag('is_flagged', 'is_flagged'); flag('is_pinned', 'is_pinned'); flag('is_focused', 'is_focused');
   if (Array.isArray(patch.categories)) { sets.push('categories_json = ?'); args.push(JSON.stringify(patch.categories.map(String).slice(0, 10))); }
+  if ('snooze_until' in patch) { sets.push('snooze_until = ?'); args.push(patch.snooze_until ? new Date(patch.snooze_until).toISOString() : null); }
   if (patch.folder_id) {
     const f = folderById(userId, patch.folder_id);
     if (!f) throw Object.assign(new Error('Folder not found.'), { status: 404 });
@@ -233,4 +238,15 @@ export function saveAi(id, fields) {
     args.push(typeof v === 'boolean' ? (v ? 1 : 0) : v);
   }
   if (sets.length) db.prepare(`UPDATE messages SET ${sets.join(', ')} WHERE id = ?`).run(...args, id);
+}
+
+const STOP = new Set('the a an and or of to in on for with about from what when where who whom which did does do is are was were be been have has had i me my we our you your it its this that these those any there their they them he she his her how why can could would should will please tell show find email emails mail message messages say said'.split(' '));
+
+/** Full messages most relevant to a natural-language question (OR search ranked by bm25). */
+export function searchForQuestion(userId, question, limit = 12) {
+  const terms = (String(question).toLowerCase().match(/[\p{L}\p{N}@._-]+/gu) || []).filter((t) => t.length > 1 && !STOP.has(t)).slice(0, 12);
+  if (!terms.length) return [];
+  const q = terms.map((t) => `"${t.replace(/"/g, '')}"*`).join(' OR ');
+  return db.prepare(`SELECT m.* FROM messages_fts f JOIN messages m ON m.id = f.rowid
+    WHERE messages_fts MATCH ? AND m.user_id = ? ORDER BY bm25(messages_fts), m.date DESC LIMIT ?`).all(q, userId, limit).map(hydrate);
 }

@@ -115,6 +115,163 @@ CREATE TABLE IF NOT EXISTS send_log (
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(subject, body, people);
 `);
 
+// ------------------------------------------------------------ Phase 2 schema
+function hasColumn(table, col) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+}
+function addColumn(table, col, def) {
+  if (!hasColumn(table, col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+
+addColumn('messages', 'snooze_until', 'TEXT');
+addColumn('messages', 'spam_score', 'REAL');
+addColumn('messages', 'auth_results', 'TEXT');          // SPF/DKIM/DMARC verdicts (JSON)
+addColumn('users', 'totp_secret', 'TEXT');
+addColumn('users', 'totp_enabled', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'ooo_enabled', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'ooo_subject', "TEXT NOT NULL DEFAULT ''");
+addColumn('users', 'ooo_message', "TEXT NOT NULL DEFAULT ''");
+addColumn('users', 'ooo_start', 'TEXT');
+addColumn('users', 'ooo_end', 'TEXT');
+addColumn('users', 'undo_send_seconds', 'INTEGER NOT NULL DEFAULT 10');
+addColumn('users', 'focused_inbox', 'INTEGER NOT NULL DEFAULT 1');
+addColumn('users', 'mailbox_type', "TEXT NOT NULL DEFAULT 'user'");   // user | shared (shared: no sign-in)
+addColumn('users', 'trash_days', 'INTEGER NOT NULL DEFAULT 30');       // empty Deleted Items after N days (0 = never)
+addColumn('organizations', 'retention_days', 'INTEGER NOT NULL DEFAULT 0');   // 0 = keep forever
+addColumn('organizations', 'litigation_hold', 'INTEGER NOT NULL DEFAULT 0');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS contacts (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  phone TEXT NOT NULL DEFAULT '',
+  company TEXT NOT NULL DEFAULT '',
+  job_title TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  is_saved INTEGER NOT NULL DEFAULT 0,       -- 0 = auto-collected from sent mail
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used TEXT,
+  UNIQUE(user_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS rules (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  conditions_json TEXT NOT NULL,   -- [{field: from|to|subject|body|has_attachment, op: contains|equals, value}]
+  actions_json TEXT NOT NULL,      -- [{type: move|read|flag|category|delete|forward|stop, value}]
+  enabled INTEGER NOT NULL DEFAULT 1,
+  position INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS templates (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS sender_lists (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  address TEXT NOT NULL,           -- full address or @domain
+  kind TEXT NOT NULL,              -- safe | blocked
+  UNIQUE(user_id, address)
+);
+
+CREATE TABLE IF NOT EXISTS auto_reply_log (
+  user_id INTEGER NOT NULL,
+  sender TEXT NOT NULL,
+  sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, sender)
+);
+
+-- Aliases: extra addresses that deliver to a user's mailbox
+CREATE TABLE IF NOT EXISTS aliases (
+  id INTEGER PRIMARY KEY,
+  address TEXT NOT NULL UNIQUE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Distribution groups (private organizations): mail to the group goes to every member
+CREATE TABLE IF NOT EXISTS groups (
+  id INTEGER PRIMARY KEY,
+  org_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  address TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  allow_external INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS group_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (group_id, user_id)
+);
+
+-- Delegation: delegate_id may open owner_id's mailbox (shared mailboxes use this too)
+CREATE TABLE IF NOT EXISTS delegates (
+  owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  delegate_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  permission TEXT NOT NULL DEFAULT 'full',   -- read | send_on_behalf | send_as | full
+  PRIMARY KEY (owner_id, delegate_id)
+);
+
+-- Organization mail flow (transport) rules
+CREATE TABLE IF NOT EXISTS transport_rules (
+  id INTEGER PRIMARY KEY,
+  org_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  match_json TEXT NOT NULL,     -- {externalRecipients: bool, subjectContains: str, bodyContains: str}
+  action TEXT NOT NULL,         -- block | disclaimer
+  value TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1
+);
+
+-- Audit log (security and compliance)
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER,
+  org_id INTEGER,
+  action TEXT NOT NULL,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_log(org_id, created_at DESC);
+
+-- Outgoing mail queue: undo send, scheduled send, retries
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  payload_json TEXT NOT NULL,      -- the compose request
+  send_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending | sending | sent | failed | cancelled
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  sent_message_id INTEGER,
+  scheduled INTEGER NOT NULL DEFAULT 0,     -- 1 = user chose a later time
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, send_at);
+
+-- Pending remote deliveries (retry with backoff)
+CREATE TABLE IF NOT EXISTS delivery_queue (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  raw_path TEXT NOT NULL,
+  envelope_from TEXT NOT NULL,
+  rcpts_json TEXT NOT NULL,
+  subject TEXT NOT NULL DEFAULT '',
+  next_attempt TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending | sent | failed
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
 export const SYSTEM_FOLDERS = [
   ['Inbox', 'inbox'],
   ['Drafts', 'drafts'],

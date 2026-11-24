@@ -16,8 +16,10 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^1.13.0",
     "express": "^5.1.0",
+    "mailauth": "^8.1.0",
     "mailparser": "^3.7.0",
     "nodemailer": "^7.0.0",
+    "qrcode": "^1.5.4",
     "smtp-server": "^3.14.0"
   }
 }

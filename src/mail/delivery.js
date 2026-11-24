@@ -1,4 +1,5 @@
-// Inbound delivery (raw MIME -> local mailboxes) and outbound sending.
+// Inbound delivery (raw MIME -> local mailboxes) and outbound sending with an
+// outbox (undo send, scheduled send) and a retrying delivery queue.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -7,40 +8,75 @@ import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { simpleParser } from 'mailparser';
 import { config, isLocalDomain } from '../config.js';
 import { db } from '../db.js';
-import { storeMessage, saveAi, mailboxUsage, getMessage, deleteMessage } from './store.js';
+import { storeMessage, saveAi, mailboxUsage, getMessage, deleteMessage, folderByRole } from './store.js';
+import { resolveRecipient, checkInbound, senderListMatch, applyRules, shouldAutoReply, recordContacts, addressesOf } from './features.js';
 import { triage } from '../ai/index.js';
+import { audit } from '../audit.js';
+import { applyTransportRules } from './transport-rules.js';
 
 const OUTBOX_DIR = path.join(config.dataDir, 'outbox');
+const QUEUE_DIR = path.join(config.dataDir, 'queue');
+fs.mkdirSync(QUEUE_DIR, { recursive: true });
 
 const addrList = (v) => (v ? (Array.isArray(v) ? v : [v]).flatMap((x) => x.value || []) : [])
   .map((a) => ({ address: String(a.address || '').toLowerCase(), name: a.name || '' }))
   .filter((a) => a.address);
 
+const httpErr = (status, message) => Object.assign(new Error(message), { status });
+
 function domainOf(addr) {
   return String(addr).split('@')[1]?.toLowerCase() || '';
+}
+
+function groupByAddress(addr) {
+  return db.prepare('SELECT * FROM groups WHERE address = ?').get(String(addr).toLowerCase());
 }
 
 export async function isLocalAddress(addr) {
   const a = String(addr || '').toLowerCase();
   if (!(await isLocalDomain(domainOf(a)))) return false;
-  return !!db.prepare('SELECT 1 FROM users WHERE email = ? AND is_disabled = 0').get(a);
+  return !!(resolveRecipient(a) || groupByAddress(a));
+}
+
+/**
+ * Expand envelope recipients into local mailbox users.
+ * Groups expand to their members; external senders may only reach groups that allow it.
+ */
+function expandRecipients(recipients, senderAddr) {
+  const users = new Map();
+  const sender = senderAddr ? resolveRecipient(senderAddr) : null;
+  const senderOrg = sender ? db.prepare('SELECT org_id FROM users WHERE id = ?').get(sender.id)?.org_id : null;
+  for (const rcpt of new Set(recipients.map((r) => String(r).toLowerCase()))) {
+    const g = groupByAddress(rcpt);
+    if (g) {
+      if (!g.allow_external && senderOrg !== g.org_id) continue;
+      for (const m of db.prepare('SELECT u.id, u.email, u.name, u.ai_enabled FROM group_members gm JOIN users u ON u.id = gm.user_id WHERE gm.group_id = ? AND u.is_disabled = 0').all(g.id)) users.set(m.id, m);
+      continue;
+    }
+    const u = resolveRecipient(rcpt);
+    if (u) users.set(u.id, u);
+  }
+  return [...users.values()];
 }
 
 /**
  * Deliver a raw RFC 5322 message to local recipients.
- * recipients: envelope RCPT TO addresses (only local mailboxes receive it).
- * Returns the list of addresses it was delivered to.
+ * smtp: { ip, helo, mailFrom } when the message came from the internet (enables SPF/DKIM/DMARC checks).
+ * Returns the list of mailbox addresses it was delivered to.
  */
-export async function deliverRaw(raw, recipients) {
+export async function deliverRaw(raw, recipients, smtp = {}) {
   const parsed = await simpleParser(raw, { skipHtmlToText: false });
+  const from = addrList(parsed.from)[0] || { address: '', name: '' };
+  const check = smtp.ip ? await checkInbound(raw, parsed, smtp) : { score: 0, reasons: [], auth: null };
   const delivered = [];
-  for (const rcpt of new Set(recipients.map((r) => String(r).toLowerCase()))) {
-    const user = db.prepare('SELECT id, ai_enabled FROM users WHERE email = ? AND is_disabled = 0').get(rcpt);
-    if (!user) continue;
+
+  for (const user of expandRecipients(recipients, from.address)) {
     if (mailboxUsage(user.id) + raw.length > config.quotas.mailboxBytes) continue; // over quota
-    const from = addrList(parsed.from)[0] || { address: '', name: '' };
+    const full = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    const listKind = senderListMatch(user.id, from.address);
+    const junk = listKind === 'blocked' || (listKind !== 'safe' && check.score >= 5);
     const id = storeMessage(user.id, {
-      folderRole: 'inbox',
+      folderRole: junk ? 'junk' : 'inbox',
       messageId: parsed.messageId || null,
       inReplyTo: parsed.inReplyTo || null,
       refs: Array.isArray(parsed.references) ? parsed.references.join(' ') : parsed.references || null,
@@ -54,8 +90,16 @@ export async function deliverRaw(raw, recipients) {
       size: raw.length,
       attachments: (parsed.attachments || []).map((a) => ({ filename: a.filename, contentType: a.contentType, content: a.content, contentId: a.contentId })),
     });
-    delivered.push(rcpt);
-    if (config.ai.autoTriage && user.ai_enabled) runTriage(user.id, id);
+    db.prepare('UPDATE messages SET spam_score = ?, auth_results = ? WHERE id = ?').run(check.score, check.auth ? JSON.stringify({ ...check.auth, reasons: check.reasons }) : null, id);
+    delivered.push(user.email);
+    audit(user.id, 'mail.received', { messageId: id, from: from.address, junk });
+
+    if (!junk) {
+      const forwards = applyRules(user.id, id);
+      for (const to of forwards) enqueueRemoteOrLocal(user.id, raw, user.email, [to], parsed.subject).catch(() => {});
+      if (shouldAutoReply(full, parsed, from.address)) sendAutoReply(full, parsed, from).catch((e) => console.warn('[ooo]', e.message));
+      if (config.ai.autoTriage && user.ai_enabled) runTriage(user.id, id);
+    }
   }
   return delivered;
 }
@@ -65,15 +109,33 @@ function runTriage(userId, messageId) {
   setImmediate(async () => {
     try {
       const m = getMessage(userId, messageId);
+      if (!m) return;
+      const u = db.prepare('SELECT focused_inbox FROM users WHERE id = ?').get(userId);
       const t = await triage(m);
-      saveAi(messageId, { ai_priority: t.priority, ai_category: t.category, ai_needs_reply: !!t.needsReply, is_focused: t.focused !== false });
+      saveAi(messageId, { ai_priority: t.priority, ai_category: t.category, ai_needs_reply: !!t.needsReply, is_focused: u.focused_inbox ? t.focused !== false : true });
     } catch (e) {
       console.warn(`[ai] triage failed for message ${messageId}: ${e.message}`);
     }
   });
 }
 
-// ---------------------------------------------------------------- outbound
+async function sendAutoReply(user, parsed, from) {
+  const subject = user.ooo_subject || `Automatic reply: ${parsed.subject || ''}`;
+  const compiled = new MailComposer({
+    from: { name: user.name, address: user.email },
+    to: from.address,
+    subject,
+    text: user.ooo_message || 'I am currently away and will reply when I return.',
+    inReplyTo: parsed.messageId,
+    references: parsed.messageId,
+    messageId: `<${crypto.randomUUID()}@${domainOf(user.email)}>`,
+    headers: { 'Auto-Submitted': 'auto-replied', 'X-Auto-Response-Suppress': 'All' },
+  }).compile();
+  const raw = await compiled.build();
+  await enqueueRemoteOrLocal(user.id, raw, user.email, [from.address], subject);
+}
+
+// ---------------------------------------------------------------- transport
 
 let transport;
 function getTransport() {
@@ -86,12 +148,15 @@ function getTransport() {
       port: o.smtp.port,
       secure: o.smtp.secure,
       auth: o.smtp.user ? { user: o.smtp.user, pass: o.smtp.pass } : undefined,
+      dkim: dkimOptions(),
     });
   } else {
-    // Development: save outgoing mail as .eml files
+    // Development: save outgoing mail as .eml files. Addresses at fail.test bounce (for testing).
     fs.mkdirSync(OUTBOX_DIR, { recursive: true });
     transport = {
       async sendMail({ envelope, raw }) {
+        const bad = envelope.to.filter((a) => /@fail\.test$/i.test(a));
+        if (bad.length) throw Object.assign(new Error(`550 5.1.1 <${bad[0]}>: Recipient address rejected`), { responseCode: 550 });
         const file = path.join(OUTBOX_DIR, `${Date.now()}-${crypto.randomUUID()}.eml`);
         fs.writeFileSync(file, raw);
         console.log(`[outbound:log] ${envelope.from} -> ${envelope.to.join(', ')} saved to ${file}`);
@@ -102,11 +167,68 @@ function getTransport() {
   return transport;
 }
 
-function dkimOptions(fromDomain) {
+function dkimOptions() {
   const d = config.outbound.dkim;
   if (!d.selector || !d.privateKeyPath) return undefined;
-  return { domainName: fromDomain, keySelector: d.selector, privateKey: fs.readFileSync(d.privateKeyPath, 'utf8') };
+  return { domainName: config.primaryDomain, keySelector: d.selector, privateKey: fs.readFileSync(d.privateKeyPath, 'utf8') };
 }
+
+const BACKOFF_MIN = [1, 5, 30, 120, 360, 720];
+
+/** Deliver locally where possible; queue the rest for remote delivery with retries. */
+async function enqueueRemoteOrLocal(userId, raw, from, rcpts, subject) {
+  const local = [];
+  const remote = [];
+  for (const r of rcpts) ((await isLocalAddress(r)) ? local : remote).push(r);
+  const delivered = local.length ? await deliverRaw(raw, local) : [];
+  if (remote.length) {
+    const file = path.join(QUEUE_DIR, `${Date.now()}-${crypto.randomUUID()}.eml`);
+    fs.writeFileSync(file, raw);
+    const r = db.prepare("INSERT INTO delivery_queue (user_id, raw_path, envelope_from, rcpts_json, subject, next_attempt) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+      .run(userId, file, from, JSON.stringify(remote), String(subject || ''));
+    await attemptDelivery(Number(r.lastInsertRowid));
+  }
+  return { delivered, remote };
+}
+
+async function attemptDelivery(id) {
+  const q = db.prepare("SELECT * FROM delivery_queue WHERE id = ? AND status = 'pending'").get(id);
+  if (!q) return;
+  // Claim the row so two workers never send the same message
+  const claim = db.prepare("UPDATE delivery_queue SET status = 'sending' WHERE id = ? AND status = 'pending'").run(id);
+  if (!claim.changes) return;
+  const rcpts = JSON.parse(q.rcpts_json);
+  try {
+    await getTransport().sendMail({ envelope: { from: q.envelope_from, to: rcpts }, raw: fs.readFileSync(q.raw_path) });
+    db.prepare("UPDATE delivery_queue SET status = 'sent', attempts = attempts + 1, last_error = NULL WHERE id = ?").run(id);
+    fs.rm(q.raw_path, { force: true }, () => {});
+  } catch (e) {
+    const attempts = q.attempts + 1;
+    const permanent = (e.responseCode && e.responseCode >= 500) || attempts >= BACKOFF_MIN.length;
+    if (permanent) {
+      db.prepare("UPDATE delivery_queue SET status = 'failed', attempts = ?, last_error = ? WHERE id = ?").run(attempts, String(e.message).slice(0, 500), id);
+      fs.rm(q.raw_path, { force: true }, () => {});
+      bounceNotice(q.user_id, rcpts, q.subject, e.message);
+    } else {
+      db.prepare(`UPDATE delivery_queue SET status = 'pending', attempts = ?, last_error = ?, next_attempt = datetime('now', '+${BACKOFF_MIN[attempts - 1]} minutes') WHERE id = ?`)
+        .run(attempts, String(e.message).slice(0, 500), id);
+    }
+  }
+}
+
+function bounceNotice(userId, rcpts, subject, reason) {
+  const u = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
+  if (!u) return;
+  storeMessage(userId, {
+    folderRole: 'inbox',
+    from: { address: `mailer-daemon@${config.primaryDomain}`, name: 'Mail Delivery System' },
+    to: [{ address: u.email, name: '' }],
+    subject: `Undeliverable: ${subject}`,
+    text: `Your message couldn't be delivered to ${rcpts.join(', ')}.\n\nReason from the receiving server:\n${reason}\n\nCheck the address and try again.`,
+  });
+}
+
+// ---------------------------------------------------------------- composing
 
 const EMAIL_RE = /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/;
 
@@ -120,7 +242,7 @@ export function parseRecipients(input) {
     const m = s.match(/^(.*)<([^>]+)>$/);
     const address = (m ? m[2] : s).trim().toLowerCase();
     const name = m ? m[1].trim().replace(/^"|"$/g, '') : '';
-    if (!EMAIL_RE.test(address)) throw Object.assign(new Error(`"${s}" is not a valid email address.`), { status: 400 });
+    if (!EMAIL_RE.test(address)) throw httpErr(400, `"${s}" is not a valid email address.`);
     out.push({ address, name });
   }
   return out;
@@ -131,30 +253,95 @@ function sentToday(userId) {
 }
 
 /**
- * Send an email from a user.
- * input: { to, cc, bcc, subject, text, html, attachments:[{filename, contentType, contentBase64}], inReplyTo, references, draftId }
+ * Addresses a user may send as: their own address and aliases, plus shared
+ * mailboxes and delegated mailboxes with send-as permission.
+ */
+export function sendIdentities(user) {
+  const own = addressesOf(user.id).map((address) => ({ address, name: user.name, mailboxId: user.id, onBehalf: false }));
+  const delegated = db.prepare(`SELECT u.id, u.email, u.name, d.permission FROM delegates d JOIN users u ON u.id = d.owner_id
+    WHERE d.delegate_id = ? AND d.permission IN ('send_as', 'send_on_behalf', 'full') AND u.is_disabled = 0`).all(user.id)
+    .map((r) => ({ address: r.email, name: r.name, mailboxId: r.id, onBehalf: r.permission === 'send_on_behalf' }));
+  return [...own, ...delegated];
+}
+
+/**
+ * Queue an email for sending. Applies the user's undo-send delay, or a chosen
+ * send time. Returns { queued, outboxId, sendAt } or the send result if sent now.
  */
 export async function sendMail(user, input) {
+  const all = [...parseRecipients(input.to), ...parseRecipients(input.cc), ...parseRecipients(input.bcc)];
+  if (!all.length) throw httpErr(400, 'Add at least one recipient.');
+  if (all.length > 100) throw httpErr(400, 'Too many recipients (max 100).');
+  if (sentToday(user.id) >= config.quotas.sendsPerUserPerDay) throw httpErr(429, 'Daily sending limit reached.');
+  if (input.from && !sendIdentities(user).some((i) => i.address === String(input.from).toLowerCase())) throw httpErr(403, 'You are not allowed to send from that address.');
+
+  let sendAt;
+  let scheduled = false;
+  if (input.sendAt) {
+    sendAt = new Date(input.sendAt);
+    if (Number.isNaN(sendAt.getTime())) throw httpErr(400, 'Invalid send time.');
+    if (sendAt.getTime() < Date.now() - 60e3) throw httpErr(400, 'Choose a time in the future.');
+    scheduled = true;
+  } else {
+    const undo = Number(user.undo_send_seconds ?? 10);
+    sendAt = new Date(Date.now() + undo * 1000);
+    if (undo <= 0) return performSend(user, input);
+  }
+  const r = db.prepare('INSERT INTO outbox (user_id, payload_json, send_at, scheduled) VALUES (?, ?, ?, ?)')
+    .run(user.id, JSON.stringify(input), sendAt.toISOString(), scheduled ? 1 : 0);
+  if (input.draftId) {
+    // The draft stays until the message actually goes out; hide it from Drafts meanwhile
+  }
+  return { queued: true, outboxId: Number(r.lastInsertRowid), sendAt: sendAt.toISOString(), scheduled };
+}
+
+export function cancelQueued(userId, outboxId) {
+  const row = db.prepare("SELECT * FROM outbox WHERE id = ? AND user_id = ? AND status = 'pending'").get(Number(outboxId), userId);
+  if (!row) throw httpErr(409, 'Too late: this message has already been sent.');
+  const ok = db.prepare("UPDATE outbox SET status = 'cancelled' WHERE id = ? AND status = 'pending'").run(row.id);
+  if (!ok.changes) throw httpErr(409, 'Too late: this message has already been sent.');
+  return JSON.parse(row.payload_json);
+}
+
+export function listScheduled(userId) {
+  return db.prepare("SELECT id, payload_json, send_at, scheduled FROM outbox WHERE user_id = ? AND status = 'pending' ORDER BY send_at").all(userId)
+    .map((r) => {
+      const p = JSON.parse(r.payload_json);
+      return { id: r.id, sendAt: r.send_at, scheduled: !!r.scheduled, to: p.to, subject: p.subject, snippet: String(p.text || '').slice(0, 140) };
+    });
+}
+
+/** Actually compose and send. Called by the outbox worker or directly when undo is off. */
+export async function performSend(user, input) {
   const to = parseRecipients(input.to);
   const cc = parseRecipients(input.cc);
   const bcc = parseRecipients(input.bcc);
   const all = [...to, ...cc, ...bcc];
-  if (!all.length) throw Object.assign(new Error('Add at least one recipient.'), { status: 400 });
-  if (all.length > 100) throw Object.assign(new Error('Too many recipients (max 100).'), { status: 400 });
-  if (sentToday(user.id) >= config.quotas.sendsPerUserPerDay) throw Object.assign(new Error('Daily sending limit reached.'), { status: 429 });
+
+  // Which mailbox is this sent from? (own address, alias, shared or delegated mailbox)
+  const identity = input.from ? sendIdentities(user).find((i) => i.address === String(input.from).toLowerCase()) : null;
+  const fromAddr = identity?.address || user.email;
+  const fromName = identity?.name || user.name;
+  const mailboxId = identity?.mailboxId || user.id;
 
   const attachments = (input.attachments || []).map((a) => ({
     filename: String(a.filename || 'attachment'),
     contentType: a.contentType || 'application/octet-stream',
     content: Buffer.from(String(a.contentBase64 || ''), 'base64'),
   }));
-  const fromDomain = domainOf(user.email);
+  const fromDomain = domainOf(fromAddr);
   const messageId = `<${crypto.randomUUID()}@${fromDomain}>`;
   let text = String(input.text || '');
-  if (user.signature && !input.html) text = `${text}\n\n-- \n${user.signature}`;
+  if (user.signature && !input.html && !input.noSignature) text = `${text}\n\n-- \n${user.signature}`;
+
+  // Organization mail flow rules (disclaimers, blocks)
+  const flow = applyTransportRules(user, { to: all, subject: input.subject, text });
+  if (flow.block) throw httpErr(403, flow.block);
+  text = flow.text;
 
   const mailOptions = {
-    from: { name: user.name, address: user.email },
+    from: { name: fromName, address: fromAddr },
+    sender: identity?.onBehalf ? { name: user.name, address: user.email } : undefined,
     to: to.map((p) => ({ name: p.name, address: p.address })),
     cc: cc.map((p) => ({ name: p.name, address: p.address })),
     subject: String(input.subject || '').slice(0, 998),
@@ -165,39 +352,71 @@ export async function sendMail(user, input) {
     inReplyTo: input.inReplyTo || undefined,
     references: input.references || undefined,
     date: new Date(),
-    headers: { 'X-Mailer': 'Arzio Mail' },
+    headers: { 'X-Mailer': 'Arzio Mail', ...(input.headers || {}) },
+    icalEvent: input.icalEvent || undefined,
   };
   const compiled = new MailComposer(mailOptions).compile();
   compiled.keepBcc = false;
   const raw = await compiled.build();
-  if (raw.length > config.quotas.maxMessageBytes) throw Object.assign(new Error('Message is too large.'), { status: 413 });
+  if (raw.length > config.quotas.maxMessageBytes) throw httpErr(413, 'Message is too large.');
 
-  // 1. Copy into the sender's Sent Items (threaded with the conversation)
-  const sentId = storeMessage(user.id, {
+  // 1. Copy into the sending mailbox's Sent Items (threaded with the conversation)
+  const sentId = storeMessage(mailboxId, {
     folderRole: 'sent', messageId, inReplyTo: input.inReplyTo, refs: input.references,
-    from: { address: user.email, name: user.name }, to, cc, bcc,
+    from: { address: fromAddr, name: fromName }, to, cc, bcc,
     subject: mailOptions.subject, text, html: input.html || '', date: mailOptions.date, isRead: true, size: raw.length,
     attachments,
   });
   db.prepare('INSERT INTO send_log (user_id) VALUES (?)').run(user.id);
+  recordContacts(user.id, all);
+  audit(user.id, 'mail.sent', { messageId: sentId, from: fromAddr, to: all.map((p) => p.address), subject: mailOptions.subject });
 
-  // 2. Local recipients are delivered directly; 3. the rest go out via the transport
-  const local = [];
-  const remote = [];
-  for (const p of all) ((await isLocalAddress(p.address)) ? local : remote).push(p.address);
-  const delivered = local.length ? await deliverRaw(raw, local) : [];
-  let remoteResult = null;
-  if (remote.length) {
-    const t = getTransport();
-    const sendOpts = { envelope: { from: user.email, to: remote }, raw };
-    const dkim = dkimOptions(fromDomain);
-    if (dkim && t.options) sendOpts.dkim = dkim;
-    remoteResult = await t.sendMail(sendOpts);
-  }
+  // 2. Local recipients now; 3. remote recipients through the queue (with retries)
+  const { delivered, remote } = await enqueueRemoteOrLocal(user.id, raw, fromAddr, all.map((p) => p.address), mailOptions.subject);
 
   if (input.draftId) {
     const d = getMessage(user.id, input.draftId);
-    if (d) { deleteMessage(user.id, d.id); deleteMessage(user.id, d.id); }
+    if (d && d.folder_id === folderByRole(user.id, 'drafts').id) { deleteMessage(user.id, d.id); deleteMessage(user.id, d.id); }
   }
-  return { id: sentId, messageId, deliveredLocally: delivered, sentRemotely: remote, transport: config.outbound.transport, remoteMessageId: remoteResult?.messageId || null };
+  return { id: sentId, messageId, deliveredLocally: delivered, sentRemotely: remote, transport: config.outbound.transport };
+}
+
+// ---------------------------------------------------------------- workers
+
+let running = false;
+export async function runWorkersOnce() {
+  if (running) return;
+  running = true;
+  try {
+    // Outbox: messages whose undo window or scheduled time has passed
+    const due = db.prepare("SELECT * FROM outbox WHERE status = 'pending' AND send_at <= ? ORDER BY send_at LIMIT 50").all(new Date().toISOString());
+    for (const row of due) {
+      if (!db.prepare("UPDATE outbox SET status = 'sending' WHERE id = ? AND status = 'pending'").run(row.id).changes) continue;
+      const user = db.prepare('SELECT u.*, o.kind AS org_kind FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.id = ?').get(row.user_id);
+      try {
+        const r = await performSend(user, JSON.parse(row.payload_json));
+        db.prepare("UPDATE outbox SET status = 'sent', sent_message_id = ? WHERE id = ?").run(r.id, row.id);
+      } catch (e) {
+        db.prepare("UPDATE outbox SET status = 'failed', last_error = ? WHERE id = ?").run(String(e.message).slice(0, 500), row.id);
+        const p = JSON.parse(row.payload_json);
+        bounceNotice(row.user_id, [String(p.to)], p.subject || '', e.message);
+      }
+    }
+    // Remote delivery retries
+    for (const q of db.prepare("SELECT id FROM delivery_queue WHERE status = 'pending' AND next_attempt <= datetime('now') LIMIT 50").all()) {
+      await attemptDelivery(q.id);
+    }
+    // Snoozed messages come back as unread
+    db.prepare("UPDATE messages SET snooze_until = NULL, is_read = 0 WHERE snooze_until IS NOT NULL AND snooze_until <= ?").run(new Date().toISOString());
+  } catch (e) {
+    console.error('[worker]', e);
+  } finally {
+    running = false;
+  }
+}
+
+export function startWorkers(intervalMs = 2000) {
+  const t = setInterval(runWorkersOnce, intervalMs);
+  t.unref();
+  return t;
 }
