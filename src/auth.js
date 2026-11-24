@@ -84,7 +84,7 @@ export function createUser({ username, name, password, ip, orgId, domain, role =
 }
 
 export function getUser(id) {
-  return db.prepare('SELECT u.id, u.org_id, u.role, u.email, u.name, u.is_admin, u.is_disabled, u.ai_enabled, u.signature, u.created_at, u.totp_enabled, u.ooo_enabled, u.ooo_subject, u.ooo_message, u.ooo_start, u.ooo_end, u.undo_send_seconds, u.focused_inbox, o.name AS org_name, o.kind AS org_kind FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.id = ?').get(id);
+  return db.prepare('SELECT u.id, u.org_id, u.role, u.email, u.name, u.is_admin, u.is_disabled, u.ai_enabled, u.signature, u.created_at, u.totp_enabled, u.ooo_enabled, u.ooo_subject, u.ooo_message, u.ooo_start, u.ooo_end, u.undo_send_seconds, u.focused_inbox, u.ui_json, o.name AS org_name, o.kind AS org_kind FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.id = ?').get(id);
 }
 
 export function findUserByEmail(email) {

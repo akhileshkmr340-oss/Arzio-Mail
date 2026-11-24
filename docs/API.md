@@ -51,7 +51,11 @@ curl -H "Authorization: Bearer $ARZIO_TOKEN" -H "Content-Type: application/json"
 | POST | `/messages/sweep` | move or delete everything from a sender |
 | POST | `/messages/:id/report` | report junk or not junk |
 | GET | `/attachments/:id` | download an attachment |
-| POST | `/send` | `{ to, cc, bcc, subject, text, html, from, attachments[], inReplyTo, sendAt }` |
+| POST | `/send` | `{ to, cc, bcc, subject, text, html, from, attachments[], inReplyTo, sendAt, importance: "high" \| "low", readReceipt, noSignature }`. Pictures in `html` as `data:` URLs go out as inline attachments; `<a data-mention="addr">` marks an @mention |
+| GET | `/messages?mentions=1` | messages that @mention you |
+| POST | `/messages/:id/receipt` | `{ send: true \| false }`: answer a read-receipt request |
+| POST | `/messages/:id/reactions`, `/reactions/lookup` | `{ emoji }` to react (again to remove); `{ ids[] }` to read reactions |
+| POST | `/ai/translate` | `{ messageId, to: "Hindi" }`: translate a message (needs Claude) |
 | POST | `/drafts` | save a draft |
 | GET, POST | `/outbox`, `/outbox/:id/cancel` | scheduled and queued mail, cancel one |
 
@@ -60,6 +64,7 @@ curl -H "Authorization: Bearer $ARZIO_TOKEN" -H "Content-Type: application/json"
 | Method | Path | What it does |
 | --- | --- | --- |
 | GET, PATCH | `/me`, `/me/preferences` | profile, signature, automatic replies, undo send, focused inbox |
+| PATCH | `/me/ui` | `{ theme, accent, density, readingPane, textSize, shortcuts, conversations, senderImages, previewText, favorites[] }` (also in `/me` as `ui_json`) |
 | GET, POST, PUT, DELETE | `/rules`, `/rules/:id`, `/rules/run` | inbox rules |
 | GET, POST, DELETE | `/templates`, `/templates/:id` | message templates |
 | GET, POST, DELETE | `/senders`, `/senders/:id` | safe and blocked senders |
@@ -80,6 +85,8 @@ curl -H "Authorization: Bearer $ARZIO_TOKEN" -H "Content-Type: application/json"
 | Method | Path | What it does |
 | --- | --- | --- |
 | GET | `/calendar/events?from=&to=` | events, recurring ones expanded |
+| GET, POST, DELETE | `/calendar/shares`, `/calendar/shares/:id` | `{ email, role: "freebusy" \| "view" \| "edit" }`: share your calendar; lists what you gave and received |
+| GET, POST, PUT, DELETE | `/calendar/shared/:ownerId/events[/:id]` | read (or, with edit rights, change) a calendar shared with you |
 | GET, POST, PUT, DELETE | `/calendar/events`, `/calendar/events/:id` | create, change, cancel; attendees get invitations |
 | POST | `/calendar/events/:id/respond` | `{ status: accepted, tentative, declined }` |
 | POST | `/calendar/freebusy` | `{ emails[], from, to }` busy times for colleagues |

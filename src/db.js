@@ -150,6 +150,11 @@ addColumn('users', 'mailbox_type', "TEXT NOT NULL DEFAULT 'user'");   // user | 
 addColumn('users', 'trash_days', 'INTEGER NOT NULL DEFAULT 30');       // empty Deleted Items after N days (0 = never)
 addColumn('organizations', 'retention_days', 'INTEGER NOT NULL DEFAULT 0');   // 0 = keep forever
 addColumn('organizations', 'litigation_hold', 'INTEGER NOT NULL DEFAULT 0');
+// Outlook-on-the-web parity: importance, read receipts, @mentions, appearance settings
+addColumn('messages', 'importance', 'TEXT');              // high | low | null (normal)
+addColumn('messages', 'receipt_to', 'TEXT');              // sender asked for a read receipt
+addColumn('messages', 'mentions_me', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'ui_json', "TEXT NOT NULL DEFAULT '{}'");
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS contacts (

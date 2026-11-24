@@ -95,6 +95,7 @@ $('#signup-form').addEventListener('submit', async (e) => {
 async function startApp() {
   const { user, usage } = await api('/me');
   state.me = user;
+  applyUi();
   $('#auth-view').classList.add('hidden');
   $('#app-view').classList.remove('hidden');
   $('#avatar-btn').textContent = initials(user.name, user.email);
@@ -142,6 +143,7 @@ const FOLDER_ICONS = { inbox: '\u{1F4E5}', drafts: '\u{1F4DD}', sent: '\u{1F4E4}
 async function loadFolders() {
   state.folders = (await api('/folders')).folders;
   renderFolders();
+  renderFavorites();
 }
 
 function renderFolders() {
@@ -160,16 +162,21 @@ $('#folder-list').addEventListener('click', (e) => {
 $('#folder-list').addEventListener('contextmenu', async (e) => {
   const b = e.target.closest('[data-folder]');
   const f = b && state.folders.find((x) => x.id === Number(b.dataset.folder));
-  if (!f || f.role) return;
+  if (!f) return;
   e.preventDefault();
-  const name = prompt(`Rename folder "${f.name}" (leave empty to delete it):`, f.name);
-  if (name === null) return;
-  try {
-    if (name.trim()) await api(`/folders/${f.id}`, { method: 'PATCH', body: { name } });
-    else if (confirm(`Delete "${f.name}"? Its messages move to Deleted Items.`)) { await api(`/folders/${f.id}`, { method: 'DELETE' }); if (state.folderId === f.id) state.folderId = null; }
-    await loadFolders();
-    if (!state.folderId) selectFolder(state.folders[0].id);
-  } catch (ex) { toast(ex.message); }
+  const key = `folder:${f.id}`;
+  const items = [[(ui().favorites || []).includes(key) ? 'Remove from Favorites' : 'Add to Favorites', () => toggleFavorite(key)],
+    ['Mark all as read', async () => { const r = await api(`/messages?folder=${f.id}&unread=1&limit=200`); if (r.messages.length) await api('/messages/bulk', { method: 'POST', body: { ids: r.messages.map((m) => m.id), action: 'read' } }); refresh(); }]];
+  if (!f.role) {
+    items.push(['Rename', async () => { const name = prompt('Folder name', f.name); if (name?.trim()) { await api(`/folders/${f.id}`, { method: 'PATCH', body: { name } }); await loadFolders(); } }]);
+    items.push(['Delete folder', async () => {
+      if (!confirm(`Delete "${f.name}"? Its messages move to Deleted Items.`)) return;
+      await api(`/folders/${f.id}`, { method: 'DELETE' }); if (state.folderId === f.id) state.folderId = null;
+      await loadFolders(); if (!state.folderId) selectFolder(state.folders[0].id);
+    }]);
+  }
+  if (f.role === 'trash' || f.role === 'junk') items.push(['Empty folder', async () => { if (!confirm(`Permanently delete everything in ${f.name}?`)) return; const r = await api(`/messages?folder=${f.id}&limit=200`); for (const m of r.messages) await api(`/messages/${m.id}`, { method: 'DELETE' }); refresh(); }]);
+  popMenu(b, items);
 });
 $$('[data-smart]').forEach((b) => b.addEventListener('click', () => { showMailView(); closeReader(); state.smart = b.dataset.smart; state.q = ''; $('#search-input').value = ''; loadList(); renderFolders(); }));
 $('#new-folder-btn').addEventListener('click', async () => {
@@ -210,7 +217,7 @@ async function loadList(append = false) {
   const f = currentFolder();
   const isInbox = f?.role === 'inbox' && !state.q && !state.smart;
   $('#focus-tabs').classList.toggle('hidden', !isInbox);
-  $('#list-title').textContent = (state.mailbox ? `${state.mailbox.name} \u00B7 ` : '') + (state.q ? `Results for "${state.q}"` : { flagged: 'Flagged', snoozed: 'Snoozed', scheduled: 'Scheduled' }[state.smart] || f?.name || '');
+  $('#list-title').textContent = (state.mailbox ? `${state.mailbox.name} \u00B7 ` : '') + (state.q ? `Results for "${state.q}"` : { flagged: 'Flagged', snoozed: 'Snoozed', scheduled: 'Scheduled', mentions: 'Mentions me' }[state.smart] || f?.name || '');
   if (state.smart === 'scheduled') {
     const { items } = await api('/outbox');
     state.messages = [];
@@ -228,6 +235,7 @@ async function loadList(append = false) {
   if (state.q) params.set('q', state.q);
   else if (state.smart === 'flagged') params.set('flagged', '1');
   else if (state.smart === 'snoozed') params.set('snoozed', '1');
+  else if (state.smart === 'mentions') params.set('mentions', '1');
   else params.set('folder', state.folderId);
   if (isInbox) params.set('focus', state.focus);
   if (!append) state.offset = 0;
@@ -248,8 +256,9 @@ function renderList() {
   }
   $('#msg-list').innerHTML = state.messages.map((m) => `
     <li class="msg ${m.is_read ? '' : 'unread'} ${m.id === state.selectedId ? 'selected' : ''}" data-id="${m.id}" draggable="true" tabindex="0">
+      <span class="lavatar" aria-hidden="true">${esc(initials(showTo ? m.to?.[0]?.name : m.from_name, showTo ? m.to?.[0]?.address : m.from_addr))}</span>
       <span class="who">${esc(showTo ? `To: ${people(m.to)}` : m.from_name || m.from_addr || '(unknown sender)')}</span>
-      <span class="icons">${m.is_pinned ? '\u{1F4CC}' : ''}${m.has_attachments ? '\u{1F4CE}' : ''}${m.is_flagged ? '<span class="flag">⚑</span>' : ''}</span>
+      <span class="icons">${m.mentions_me ? '<span class="at" title="You were mentioned">@</span>' : ''}${m.importance === 'high' ? '<span class="imp" title="High importance">!</span>' : m.importance === 'low' ? '<span title="Low importance">↓</span>' : ''}${m.is_pinned ? '\u{1F4CC}' : ''}${m.has_attachments ? '\u{1F4CE}' : ''}${m.is_flagged ? '<span class="flag">⚑</span>' : ''}</span>
       <span class="subj">${esc(m.subject || '(no subject)')}</span>
       <span class="when">${fmtDate(m.date)}</span>
       <span class="snip">${m.snooze_until ? `<span class="tag">\u23F0 ${fmtDate(m.snooze_until)}</span>` : ''}${m.ai_priority === 'high' ? '<span class="tag high">High priority</span>' : ''}${m.ai_needs_reply && f?.role !== 'sent' ? '<span class="tag reply">Needs reply</span>' : ''}${(m.categories || []).map((c) => `<span class="tag cat">${esc(c)}</span>`).join('')}${esc(m.snippet)}</span>
@@ -321,7 +330,8 @@ async function openMessage(id) {
   const { message } = await api(`/messages/${id}`);
   if (listed && !listed.is_read) { listed.is_read = true; loadFolders(); }
   renderList();
-  const { messages: thread } = await api(`/threads/${encodeURIComponent(message.thread_id)}`);
+  const { messages: all } = await api(`/threads/${encodeURIComponent(message.thread_id)}`);
+  const thread = ui().conversations === false ? [message] : all;
   renderReader(message, thread);
 }
 
@@ -349,9 +359,14 @@ function renderReader(message, thread) {
       <span class="sep"></span>
       <button class="btn ai" data-act="summarize">✨ Summarize</button>
       <button class="btn ai" data-act="aireply">✨ Draft reply</button>
+      <button class="btn" data-act="translate" title="Translate this message">文A Translate</button>
+      <button class="btn" data-act="immersive" title="Immersive Reader">\u{1F4D6} Immersive Reader</button>
+      <button class="btn" data-act="print" title="Print">\u{1F5A8} Print</button>
     </div>
+    ${message.receipt_to ? `<div class="info-bar" id="receipt-bar">${esc(message.from_name || message.from_addr)} asked to be notified when you read this message. <button class="btn small" data-act="receipt-send">Send receipt</button> <button class="link-btn" data-act="receipt-skip">Don't send</button></div>` : ''}
     <h1 class="thread-subject">${esc(message.subject || '(no subject)')}</h1>
     <div class="thread-meta">
+      ${message.importance === 'high' ? '<span class="tag high">! High importance</span>' : message.importance === 'low' ? '<span class="tag">↓ Low importance</span>' : ''}
       ${message.ai_priority === 'high' ? '<span class="tag high">High priority</span>' : ''}
       ${message.ai_category ? `<span class="tag">${esc(message.ai_category)}</span>` : ''}
       ${(message.categories || []).map((c) => `<span class="tag cat">${esc(c)}</span>`).join('')}
@@ -361,6 +376,8 @@ function renderReader(message, thread) {
     <div id="ai-out">${message.ai_summary ? aiCard({ summary: message.ai_summary, actionItems: [] }, true) : ''}</div>
     ${thread.map((m) => mailItem(m, m.id === message.id || thread.length === 1 || m === thread[thread.length - 1])).join('')}`;
   showPane('reader');
+  state.current = { message, thread };
+  loadReactions(thread);
   $$('.mail-item', r).forEach((el) => {
     $('.mail-head', el).addEventListener('click', () => el.classList.toggle('collapsed'));
     const iframe = $('iframe', el);
@@ -382,7 +399,7 @@ function renderReader(message, thread) {
 }
 
 function mailItem(m, open) {
-  const atts = (m.attachments || []).map((a) => `<a class="attachment" href="/api/attachments/${a.id}">\u{1F4CE} ${esc(a.filename)} <span class="muted">(${fmtBytes(a.size)})</span></a>`).join('');
+  const atts = (m.attachments || []).filter((a) => !a.inline).map((a) => `<a class="attachment" href="/api/attachments/${a.id}">\u{1F4CE} ${esc(a.filename)} <span class="muted">(${fmtBytes(a.size)})</span></a>`).join('');
   return `
     <div class="mail-item ${open ? '' : 'collapsed'}" data-id="${m.id}">
       <div class="mail-head">
@@ -396,6 +413,7 @@ function mailItem(m, open) {
       <div class="mail-body">
         ${m.html_body ? '<iframe sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" title="Message content"></iframe>' : `<pre>${esc(m.text_body)}</pre>`}
         ${atts ? `<div class="attachments">${atts}</div>` : ''}
+        <div class="reactions" data-reactions="${m.id}"></div>
       </div>
     </div>`;
 }
@@ -432,6 +450,17 @@ async function readerAction(act, message, thread, btn) {
       return;
     }
     if (act === 'open-calendar') { showView('calendar', { date: message.calendar.start_at }); return; }
+    if (act.startsWith('react:')) {
+      const [, id, emoji] = act.split(':');
+      const { reactions } = await api(`/messages/${id}/reactions`, { method: 'POST', body: { emoji } });
+      renderReactions(Number(id), reactions);
+      return;
+    }
+    if (act.startsWith('react-pick:')) {
+      const id = act.slice(11);
+      popMenu(btn, REACTIONS.map((em) => [em, () => readerAction(`react:${id}:${em}`, message, thread, btn)]), { grid: true });
+      return;
+    }
     switch (act) {
       case 'back': closeReader(); break;
       case 'reply': case 'replyall': case 'forward': openComposer(act, message); break;
@@ -468,6 +497,25 @@ async function readerAction(act, message, thread, btn) {
         break;
       }
       case 'aireply': openComposer('reply', message, { ai: true }); break;
+      case 'receipt-send': case 'receipt-skip':
+        await api(`/messages/${message.id}/receipt`, { method: 'POST', body: { send: act === 'receipt-send' } });
+        message.receipt_to = null;
+        $('#receipt-bar')?.classList.add('hidden');
+        toast(act === 'receipt-send' ? 'Read receipt sent.' : 'No receipt sent.'); break;
+      case 'print': printMessage(message, thread); break;
+      case 'immersive': openImmersive(message); break;
+      case 'translate': {
+        const langs = ['English', 'Hindi', 'Spanish', 'French', 'German', 'Arabic', 'Chinese (Simplified)', 'Japanese', 'Portuguese', 'Bengali', 'Tamil', 'Telugu', 'Marathi', 'Urdu'];
+        popMenu(btn, langs.map((lang) => [`Translate to ${lang}`, async () => {
+          busy(btn, true, 'Translating');
+          try {
+            const t = await api('/ai/translate', { method: 'POST', body: { messageId: message.id, to: lang } });
+            $('#ai-out').innerHTML = `<div class="ai-card translate"><h4>文A Translated to ${esc(t.to)}</h4><p><strong>${esc(t.subject)}</strong></p><p class="pre">${esc(t.text)}</p><button class="link-btn" data-act="untranslate">Show original only</button></div>`;
+          } finally { busy(btn, false); }
+        }]));
+        break;
+      }
+      case 'untranslate': $('#ai-out').innerHTML = ''; break;
       case 'snooze': {
         const t = new Date();
         const at = (d, h) => { const x = new Date(t); x.setDate(x.getDate() + d); x.setHours(h, 0, 0, 0); return x; };
@@ -523,7 +571,28 @@ async function readerAction(act, message, thread, btn) {
   } catch (e) { toast(e.message); }
 }
 
-// ------------------------------------------------------------ composer
+// ------------------------------------------------------------ composer (rich text, like Outlook)
+const textToHtml = (t) => esc(t).replace(/\r?\n/g, '<br>');
+
+// Mail HTML that goes into the editor is cleaned first: no scripts, handlers, frames or forms.
+function cleanForEditor(html) {
+  const doc = new DOMParser().parseFromString(`<body>${html || ''}</body>`, 'text/html');
+  doc.querySelectorAll('script,style,iframe,object,embed,form,input,button,textarea,select,link,meta,base,svg,math,template,noscript').forEach((n) => n.remove());
+  doc.querySelectorAll('*').forEach((el) => {
+    for (const a of [...el.attributes]) {
+      const v = a.value.trim().toLowerCase();
+      if (a.name.startsWith('on') || ((a.name === 'href' || a.name === 'src') && /^(javascript|vbscript):/.test(v)) || (a.name === 'src' && v.startsWith('data:') && !v.startsWith('data:image/'))) el.removeAttribute(a.name);
+    }
+  });
+  return doc.body.innerHTML;
+}
+
+function quoteHtml(m, forward) {
+  const head = `<b>From:</b> ${esc(fmtAddr({ name: m.from_name, address: m.from_addr }))}<br><b>Sent:</b> ${esc(fmtDate(m.date, true))}<br><b>To:</b> ${esc(people(m.to))}${m.cc?.length ? `<br><b>Cc:</b> ${esc(people(m.cc))}` : ''}<br><b>Subject:</b> ${esc(m.subject || '')}`;
+  const original = m.html_body ? cleanForEditor(m.html_body) : textToHtml(m.text_body || '');
+  return `<div class="arzio-quote">${forward ? '<p>---------- Forwarded message ----------</p>' : '<hr>'}<p>${head}</p>${original}</div>`;
+}
+// Plain-text quote (kept for the text/plain part and for the AI)
 function quote(m) {
   const body = (m.text_body || '').split('\n').map((l) => `> ${l}`).join('\n');
   return `\n\n\nOn ${fmtDate(m.date, true)}, ${m.from_name || m.from_addr} wrote:\n${body}`;
@@ -531,10 +600,11 @@ function quote(m) {
 // Where the quoted original starts in a reply ("On <date>, <name> wrote:")
 const quoteIndex = (text) => text.search(/\n*(On [^\n]+ wrote:|---------- Forwarded message ----------)\n/);
 const fmtAddr = (p) => (p.name ? `${p.name} <${p.address}>` : p.address);
+const signatureHtml = () => (state.me?.signature ? `<div class="arzio-signature"><br>-- <br>${textToHtml(state.me.signature)}</div>` : '');
 
 function openComposer(mode, m, opts = {}) {
   const me = state.me.email;
-  let c = { mode, to: '', cc: '', bcc: '', subject: '', text: '', inReplyTo: null, references: null, replyTo: m?.id || null, attachments: [], draftId: null };
+  let c = { mode, to: '', cc: '', bcc: '', subject: '', text: '', html: `<div><br></div>${signatureHtml()}`, quoteHtml: '', inReplyTo: null, references: null, replyTo: m?.id || null, attachments: [], draftId: null, importance: 'normal', readReceipt: false };
   if (m && (mode === 'reply' || mode === 'replyall')) {
     const sentByMe = m.from_addr === me;
     const primary = sentByMe ? m.to : [{ address: m.from_addr, name: m.from_name }];
@@ -544,14 +614,18 @@ function openComposer(mode, m, opts = {}) {
       c.cc = others.map(fmtAddr).join(', ');
     }
     c.subject = /^re:/i.test(m.subject) ? m.subject : `Re: ${m.subject}`;
-    c.text = quote(m);
+    c.quoteHtml = quoteHtml(m, false);
+    c.quoteText = quote(m);
     c.inReplyTo = m.message_id;
     c.references = [m.refs, m.message_id].filter(Boolean).join(' ');
   } else if (m && mode === 'forward') {
     c.subject = /^fw[d]?:/i.test(m.subject) ? m.subject : `Fw: ${m.subject}`;
-    c.text = `\n\n\n---------- Forwarded message ----------\nFrom: ${fmtAddr({ name: m.from_name, address: m.from_addr })}\nDate: ${fmtDate(m.date, true)}\nSubject: ${m.subject}\nTo: ${people(m.to)}\n\n${m.text_body || ''}`;
+    c.quoteHtml = quoteHtml(m, true);
+    c.quoteText = `\n\n\n---------- Forwarded message ----------\nFrom: ${fmtAddr({ name: m.from_name, address: m.from_addr })}\nDate: ${fmtDate(m.date, true)}\nSubject: ${m.subject}\nTo: ${people(m.to)}\n\n${m.text_body || ''}`;
+    c.forwardOf = m.id;
   }
   Object.assign(c, opts.prefill || {});
+  if (opts.prefill?.text && !opts.prefill.html) c.html = textToHtml(opts.prefill.text);
   state.composer = c;
   renderComposer(opts.ai);
 }
@@ -562,10 +636,14 @@ async function openDraft(id) {
   renderList();
   state.composer = {
     mode: 'new', to: (d.to || []).map(fmtAddr).join(', '), cc: (d.cc || []).map(fmtAddr).join(', '), bcc: (d.bcc || []).map(fmtAddr).join(', '),
-    subject: d.subject, text: d.text_body, inReplyTo: d.in_reply_to, references: d.refs, replyTo: null, attachments: [], draftId: d.id,
+    subject: d.subject, text: d.text_body, html: d.html_body ? cleanForEditor(d.html_body) : textToHtml(d.text_body || ''), quoteHtml: '',
+    inReplyTo: d.in_reply_to, references: d.refs, replyTo: null, attachments: [], draftId: d.id, importance: d.importance || 'normal', readReceipt: false,
   };
   renderComposer();
 }
+
+const FONT_SIZES = [['2', 'Small'], ['3', 'Normal'], ['5', 'Large'], ['6', 'Huge']];
+const EMOJI = ['😀', '😂', '😊', '😍', '🙂', '😉', '🤔', '😢', '😮', '👍', '👎', '👏', '🙏', '💪', '🎉', '🔥', '❤️', '✅', '❌', '⭐', '📅', '📎', '☕', '🚀'];
 
 function renderComposer(focusAi = false) {
   const c = state.composer;
@@ -574,19 +652,21 @@ function renderComposer(focusAi = false) {
   form.innerHTML = `
     <div class="toolbar">
       <button class="btn back-btn" type="button" data-c="close">←</button>
-      <button class="btn primary" type="submit">Send</button>
+      <button class="btn primary" type="submit" title="Send (Ctrl+Enter)">Send</button>
       <button class="btn" type="button" data-c="schedule" title="Schedule send">\u{1F552} Later</button>
       <button class="btn" type="button" data-c="attach">\u{1F4CE} Attach</button>
       <button class="btn" type="button" data-c="save">Save draft</button>
       <button class="btn" type="button" data-c="discard">Discard</button>
       <button class="btn" type="button" data-c="templates">Templates</button>
+      <button class="btn" type="button" data-c="options" title="Importance, read receipt">⋯ Options</button>
       <span class="sep"></span>
-      <button class="btn ai" type="button" data-c="coach">\u2728 Check before sending</button>
+      <button class="btn ai" type="button" data-c="coach">✨ Check before sending</button>
       <button class="btn ai" type="button" data-c="rw-improve">✨ Improve</button>
       <button class="btn ai" type="button" data-c="rw-shorten">Shorten</button>
       <button class="btn ai" type="button" data-c="rw-formal">More formal</button>
       <button class="btn ai" type="button" data-c="rw-friendly">Friendlier</button>
       <input type="file" multiple hidden id="file-input">
+      <input type="file" accept="image/*" hidden id="image-input">
     </div>
     <div class="ai-bar">
       <strong style="color:var(--ai)">✨ ${isReply ? 'Draft a reply' : 'Draft with AI'}</strong>
@@ -599,21 +679,66 @@ function renderComposer(focusAi = false) {
     <div class="field cc-row ${c.cc || c.bcc ? '' : 'hidden'}"><label for="c-cc">Cc</label><input id="c-cc" name="cc" value="${esc(c.cc)}"></div>
     <div class="field cc-row ${c.cc || c.bcc ? '' : 'hidden'}"><label for="c-bcc">Bcc</label><input id="c-bcc" name="bcc" value="${esc(c.bcc)}"></div>
     <div class="field"><label for="c-subject">Subject</label><input id="c-subject" name="subject" value="${esc(c.subject)}"></div>
+    <div class="compose-flags" id="compose-flags"></div>
     <div class="att-list" id="att-list"></div>
     <div id="coach-out"></div>
-    <textarea name="text" id="c-text" aria-label="Message body">${esc(c.text)}</textarea>`;
+    <div class="fmt-bar" role="toolbar" aria-label="Formatting">
+      <button type="button" data-fmt="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <button type="button" data-fmt="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+      <button type="button" data-fmt="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+      <button type="button" data-fmt="strikeThrough" title="Strikethrough"><s>S</s></button>
+      <select data-fmtsel="fontSize" title="Font size" aria-label="Font size">${FONT_SIZES.map(([v, l]) => `<option value="${v}" ${v === '3' ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <select data-fmtsel="fontName" title="Font" aria-label="Font"><option value="Segoe UI">Segoe UI</option><option value="Arial">Arial</option><option value="Calibri">Calibri</option><option value="Georgia">Georgia</option><option value="Times New Roman">Times New Roman</option><option value="Courier New">Courier New</option><option value="Verdana">Verdana</option></select>
+      <label class="color-btn" title="Font colour">A<input type="color" data-fmtcolor="foreColor" value="#c50f1f" aria-label="Font colour"></label>
+      <label class="color-btn hl" title="Highlight">ab<input type="color" data-fmtcolor="hiliteColor" value="#fff100" aria-label="Highlight colour"></label>
+      <span class="sep"></span>
+      <button type="button" data-fmt="insertUnorderedList" title="Bullets">• List</button>
+      <button type="button" data-fmt="insertOrderedList" title="Numbering">1. List</button>
+      <button type="button" data-fmt="outdent" title="Decrease indent">⇤</button>
+      <button type="button" data-fmt="indent" title="Increase indent">⇥</button>
+      <button type="button" data-fmt="justifyLeft" title="Align left">⯇</button>
+      <button type="button" data-fmt="justifyCenter" title="Center">≡</button>
+      <button type="button" data-fmt="justifyRight" title="Align right">⯈</button>
+      <button type="button" data-fmt="quote" title="Quote">❝</button>
+      <span class="sep"></span>
+      <button type="button" data-fmt="link" title="Insert link (Ctrl+K)">\u{1F517}</button>
+      <button type="button" data-fmt="image" title="Insert picture inline">\u{1F5BC}</button>
+      <button type="button" data-fmt="table" title="Insert table">▦</button>
+      <button type="button" data-fmt="emoji" title="Emoji">\u{1F60A}</button>
+      <button type="button" data-fmt="hr" title="Horizontal line">―</button>
+      <button type="button" data-fmt="removeFormat" title="Clear formatting">⌫ Clear</button>
+      <button type="button" data-fmt="undo" title="Undo (Ctrl+Z)">↶</button>
+      <button type="button" data-fmt="redo" title="Redo (Ctrl+Y)">↷</button>
+    </div>
+    <div id="c-body" class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message body" spellcheck="true">${c.html}</div>
+    ${c.quoteHtml ? `<div class="quote-wrap"><button class="link-btn" type="button" data-c="show-quote" title="Show the original message">⋯ Show original message</button><div id="c-quote" class="editor quote hidden" contenteditable="true" aria-label="Original message">${c.quoteHtml}</div></div>` : ''}`;
   showPane('composer');
   loadIdentities(c);
   ['#c-to', '#c-cc', '#c-bcc'].forEach((sel) => attachAutocomplete($(sel)));
   renderAttachments();
+  renderComposeFlags();
+  const bodyEl = $('#c-body');
+  try { document.execCommand('styleWithCSS', false, true); } catch { /* old browsers */ }
   if (focusAi) $('#ai-instructions').focus();
   else if (!c.to) $('#c-to').focus();
-  else { const t = $('#c-text'); t.focus(); t.setSelectionRange(0, 0); }
+  else { bodyEl.focus(); const r = document.createRange(); r.setStart(bodyEl, 0); r.collapse(true); getSelection().removeAllRanges(); getSelection().addRange(r); }
 
   form.onclick = (e) => {
     const b = e.target.closest('[data-c]');
     if (b) composerAction(b.dataset.c, b);
+    const f = e.target.closest('[data-fmt]');
+    if (f) formatAction(f.dataset.fmt, f);
   };
+  // Keep the caret in the editor when a toolbar button is pressed
+  $('.fmt-bar', form).onmousedown = (e) => { if (e.target.closest('button')) e.preventDefault(); };
+  $$('[data-fmtsel]', form).forEach((s) => { s.onchange = () => { restoreSel(); document.execCommand(s.dataset.fmtsel, false, s.value); bodyEl.focus(); }; });
+  $$('[data-fmtcolor]', form).forEach((s) => { s.oninput = () => { restoreSel(); document.execCommand(s.dataset.fmtcolor, false, s.value); }; });
+  bodyEl.addEventListener('keyup', saveSel);
+  bodyEl.addEventListener('mouseup', saveSel);
+  bodyEl.addEventListener('blur', saveSel);
+  bodyEl.addEventListener('paste', onEditorPaste);
+  bodyEl.addEventListener('drop', onEditorDrop);
+  attachMentions(bodyEl);
   $('#file-input').onchange = async (e) => {
     for (const file of e.target.files) {
       if (file.size > 20 * 1024 * 1024) { toast(`${file.name} is larger than 20 MB.`); continue; }
@@ -623,11 +748,18 @@ function renderComposer(focusAi = false) {
     e.target.value = '';
     renderAttachments();
   };
+  $('#image-input').onchange = async (e) => { for (const file of e.target.files) await insertImageFile(file); e.target.value = ''; };
   $('#ai-instructions').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); composerAction('ai-draft', $('[data-c="ai-draft"]')); } };
+  form.onkeydown = (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); form.requestSubmit(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && e.target.closest('.editor')) { e.preventDefault(); formatAction('link'); }
+  };
   form.onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('button[type="submit"]', form);
     syncComposer();
+    if (!c.subject.trim() && !confirm('Send this message without a subject?')) return;
+    if (/\battach(ed|ment)?\b/i.test(c.text.slice(0, quoteIndex(c.text) >= 0 ? quoteIndex(c.text) : undefined)) && !c.attachments.length && !c.forwardOf && !confirm('You mention an attachment, but nothing is attached. Send anyway?')) return;
     busy(btn, true, 'Sending');
     try {
       await submitCompose(c);
@@ -635,8 +767,153 @@ function renderComposer(focusAi = false) {
   };
 }
 
+let savedRange = null;
+function saveSel() {
+  const s = getSelection();
+  if (s.rangeCount && $('#c-body')?.contains(s.anchorNode)) savedRange = s.getRangeAt(0).cloneRange();
+}
+function restoreSel() {
+  const body = $('#c-body');
+  if (!body) return;
+  body.focus();
+  if (savedRange && body.contains(savedRange.startContainer)) { const s = getSelection(); s.removeAllRanges(); s.addRange(savedRange); }
+}
+
+async function insertImageFile(file) {
+  if (!/^image\/(png|jpe?g|gif|webp|bmp)$/.test(file.type)) { toast('Pictures can be PNG, JPEG, GIF, WebP or BMP.'); return; }
+  if (file.size > 5 * 1024 * 1024) { toast('Pictures in the message can be up to 5 MB. Attach larger files instead.'); return; }
+  const url = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result)); fr.readAsDataURL(file); });
+  restoreSel();
+  document.execCommand('insertHTML', false, `<img src="${url}" alt="${esc(file.name)}" style="max-width:100%">`);
+}
+function onEditorPaste(e) {
+  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+  if (files.length) { e.preventDefault(); saveSel(); files.forEach(insertImageFile); }
+}
+function onEditorDrop(e) {
+  const files = [...(e.dataTransfer?.files || [])];
+  if (!files.length) return;
+  e.preventDefault();
+  for (const f of files) {
+    if (f.type.startsWith('image/') && f.size <= 5 * 1024 * 1024) insertImageFile(f);
+    else {
+      const fr = new FileReader();
+      fr.onload = () => { state.composer.attachments.push({ filename: f.name, contentType: f.type || 'application/octet-stream', contentBase64: String(fr.result).split(',')[1], size: f.size }); renderAttachments(); };
+      fr.readAsDataURL(f);
+    }
+  }
+}
+
+function formatAction(cmd, btn) {
+  const body = $('#c-body');
+  if (!body) return;
+  restoreSel();
+  switch (cmd) {
+    case 'link': {
+      const sel = getSelection().toString();
+      const url = prompt('Link address (https://...)', /^https?:\/\//.test(sel) ? sel : 'https://');
+      if (!url || !/^(https?:\/\/|mailto:)/i.test(url)) return;
+      restoreSel();
+      if (sel) document.execCommand('createLink', false, url);
+      else document.execCommand('insertHTML', false, `<a href="${esc(url)}">${esc(url)}</a>`);
+      break;
+    }
+    case 'image': $('#image-input').click(); return;
+    case 'quote': document.execCommand('formatBlock', false, 'blockquote'); break;
+    case 'hr': document.execCommand('insertHorizontalRule'); break;
+    case 'table': {
+      const size = prompt('Table size: columns x rows', '3x2');
+      if (!size) return;
+      const [cols, rws] = size.toLowerCase().split('x').map((v) => Number(v.trim()));
+      const n = Math.min(Math.max(cols || 0, 1), 10);
+      const rows = Math.min(Math.max(rws || 2, 1), 30);
+      const cell = '<td style="border:1px solid #bbb;padding:4px 8px;min-width:60px">&nbsp;</td>';
+      restoreSel();
+      document.execCommand('insertHTML', false, `<table style="border-collapse:collapse">${`<tr>${cell.repeat(n)}</tr>`.repeat(rows)}</table><br>`);
+      break;
+    }
+    case 'emoji':
+      popMenu(btn, EMOJI.map((em) => [em, () => { restoreSel(); document.execCommand('insertText', false, em); }]), { grid: true });
+      return;
+    default: document.execCommand(cmd);
+  }
+  saveSel();
+}
+
+// @mentions: type @ and a name, pick a person; they are added to To and see "@" in their inbox
+function attachMentions(editor) {
+  let box = null; let items = []; let idx = 0; let timer;
+  const close = () => { box?.remove(); box = null; };
+  const termBeforeCaret = () => {
+    const s = getSelection();
+    if (!s.rangeCount || !s.isCollapsed) return null;
+    const node = s.anchorNode;
+    if (!node || node.nodeType !== 3 || !editor.contains(node)) return null;
+    const before = node.textContent.slice(0, s.anchorOffset);
+    const m = before.match(/(^|[\s(])@([\p{L}\p{N}._-]{1,40})$/u);
+    return m ? { node, end: s.anchorOffset, term: m[2] } : null;
+  };
+  const pick = (it) => {
+    const t = termBeforeCaret();
+    if (!t) return close();
+    const r = document.createRange();
+    r.setStart(t.node, t.end - t.term.length - 1); r.setEnd(t.node, t.end);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    const first = (it.name || it.email).split(' ')[0];
+    document.execCommand('insertHTML', false, `<a href="mailto:${esc(it.email)}" data-mention="${esc(it.email)}" class="mention">@${esc(first)}</a>&nbsp;`);
+    const to = $('#c-to');
+    const have = to.value.toLowerCase();
+    if (!have.includes(it.email.toLowerCase()) && !$('#c-cc').value.toLowerCase().includes(it.email.toLowerCase())) to.value = (to.value.trim().replace(/[,;]\s*$/, '') ? `${to.value.trim().replace(/[,;]\s*$/, '')}, ` : '') + (it.name ? `${it.name} <${it.email}>` : it.email);
+    close();
+  };
+  editor.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const t = termBeforeCaret();
+      if (!t) return close();
+      const { suggestions } = await api(`/contacts/suggest?q=${encodeURIComponent(t.term)}`).catch(() => ({ suggestions: [] }));
+      items = suggestions.filter((x) => x.source !== 'group').slice(0, 8); idx = 0;
+      if (!items.length) return close();
+      if (!box) { box = document.createElement('div'); box.className = 'suggest mention-box'; document.body.appendChild(box); }
+      const rect = getSelection().getRangeAt(0).getBoundingClientRect();
+      box.style.left = `${Math.min(rect.left, innerWidth - 280)}px`; box.style.top = `${rect.bottom + 4}px`;
+      box.innerHTML = items.map((it, i) => `<div data-i="${i}" class="${i === 0 ? 'active' : ''}">${esc(it.name || it.email)}<small>${esc(it.email)}</small></div>`).join('');
+      box.onmousedown = (e) => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); pick(items[Number(d.dataset.i)]); } };
+    }, 120);
+  });
+  editor.addEventListener('keydown', (e) => {
+    if (!box) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); idx = (idx + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      $$('div', box).forEach((d, i) => d.classList.toggle('active', i === idx));
+    } else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pick(items[idx]); } else if (e.key === 'Escape') { e.stopPropagation(); close(); }
+  });
+  editor.addEventListener('blur', () => setTimeout(close, 150));
+}
+
+function renderComposeFlags() {
+  const c = state.composer;
+  const el = $('#compose-flags');
+  if (!el) return;
+  el.innerHTML = [c.importance === 'high' ? '<span class="tag high">! High importance</span>' : '', c.importance === 'low' ? '<span class="tag">↓ Low importance</span>' : '', c.readReceipt ? '<span class="tag">Read receipt requested</span>' : ''].join('');
+}
+
+// The editor without the signature, as plain text (for the AI and the text/plain part)
+function bodyText() {
+  const clone = $('#c-body').cloneNode(true);
+  clone.querySelectorAll('.arzio-signature').forEach((n) => n.remove());
+  return clone.innerText.replace(/ /g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+function setBodyText(text) {
+  const body = $('#c-body');
+  const sig = body.querySelector('.arzio-signature');
+  body.innerHTML = text.split(/\n{2,}/).map((p) => `<div>${textToHtml(p)}</div><div><br></div>`).join('') + (sig ? sig.outerHTML : '');
+}
+
 function composePayload(c, extra = {}) {
-  return { from: c.from || undefined, to: c.to, cc: c.cc, bcc: c.bcc, subject: c.subject, text: c.text, attachments: c.attachments, inReplyTo: c.inReplyTo, references: c.references, draftId: c.draftId, ...extra };
+  const html = `<div class="arzio-body">${c.html}</div>${c.quoteHtml ? `<br>${c.quoteHtml}` : ''}`;
+  return { from: c.from || undefined, to: c.to, cc: c.cc, bcc: c.bcc, subject: c.subject, text: c.text, html, noSignature: true, attachments: c.attachments, inReplyTo: c.inReplyTo, references: c.references, draftId: c.draftId,
+    importance: c.importance !== 'normal' ? c.importance : undefined, readReceipt: c.readReceipt || undefined, forwardOf: c.forwardOf || undefined, ...extra };
 }
 
 async function submitCompose(c, extra = {}) {
@@ -655,7 +932,7 @@ function undoToast(outboxId, seconds) {
   clearTimeout(toastTimer);
   t.classList.remove('hidden');
   t.classList.add('undo-toast');
-  t.innerHTML = `Sending\u2026 <button type="button">Undo</button>`;
+  t.innerHTML = `Sending… <button type="button">Undo</button>`;
   $('button', t).onclick = async () => {
     try {
       const { draft } = await api(`/outbox/${outboxId}/cancel`, { method: 'POST', body: {} });
@@ -669,7 +946,10 @@ function undoToast(outboxId, seconds) {
 
 function draftToComposer(d) {
   const j = (v) => (Array.isArray(v) ? v.join(', ') : v || '');
-  return { from: d.from || '', to: j(d.to), cc: j(d.cc), bcc: j(d.bcc), subject: d.subject || '', text: d.text || '', inReplyTo: d.inReplyTo, references: d.references, attachments: d.attachments || [], draftId: d.draftId || null };
+  // A cancelled send carries the full HTML (body + quoted original): edit it as one body
+  const html = d.html ? cleanForEditor(String(d.html).replace(/<div class="arzio-body">([\s\S]*)<\/div>(<br>)?(?=<div class="arzio-quote">|$)/, '$1')) : textToHtml(d.text || '');
+  return { from: d.from || '', to: j(d.to), cc: j(d.cc), bcc: j(d.bcc), subject: d.subject || '', text: d.text || '', html, quoteHtml: '', inReplyTo: d.inReplyTo, references: d.references,
+    attachments: d.attachments || [], draftId: d.draftId || null, importance: d.importance || 'normal', readReceipt: !!d.readReceipt, forwardOf: d.forwardOf || null };
 }
 
 async function loadIdentities(c) {
@@ -711,7 +991,7 @@ function attachAutocomplete(input) {
       if (!box) { box = document.createElement('div'); box.className = 'suggest'; input.parentElement.appendChild(box); }
       box.style.left = `${input.offsetLeft}px`;
       box.style.top = `${input.offsetTop + input.offsetHeight}px`;
-      box.innerHTML = items.map((it, i) => `<div data-i="${i}">${esc(it.name || it.email)}<small>${esc(it.email)}${it.source === 'directory' ? ' \u00B7 Directory' : it.source === 'group' ? ' \u00B7 Group' : ''}</small></div>`).join('');
+      box.innerHTML = items.map((it, i) => `<div data-i="${i}">${esc(it.name || it.email)}<small>${esc(it.email)}${it.source === 'directory' ? ' · Directory' : it.source === 'group' ? ' · Group' : ''}</small></div>`).join('');
       box.onmousedown = (e) => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); pick(items[Number(d.dataset.i)]); } };
     }, 120);
   });
@@ -726,17 +1006,18 @@ function attachAutocomplete(input) {
   input.addEventListener('blur', () => setTimeout(close, 150));
 }
 
-// Small pop-up menu: items = [[label, fn], ...]; opts.datetime adds a custom date/time picker
+// Small pop-up menu: items = [[label, fn], ...]; opts.datetime adds a custom date/time picker, opts.grid lays items out as a grid
 function popMenu(anchor, items, opts = {}) {
   $$('.menu').forEach((m) => m.remove());
   const m = document.createElement('div');
-  m.className = 'menu';
+  m.className = `menu${opts.grid ? ' grid' : ''}`;
   m.innerHTML = items.map(([label], i) => `<button type="button" data-i="${i}">${esc(label)}</button>`).join('')
     + (opts.datetime ? '<div class="muted small" style="padding:6px 10px 0">Pick a date and time</div><input type="datetime-local"><button type="button" data-custom>Set</button>' : '');
   document.body.appendChild(m);
   const r = anchor.getBoundingClientRect();
   m.style.left = `${Math.min(r.left, window.innerWidth - 300)}px`;
-  m.style.top = `${r.bottom + 4}px`;
+  m.style.top = `${Math.min(r.bottom + 4, window.innerHeight - m.offsetHeight - 8)}px`;
+  m.onmousedown = (e) => { if (opts.grid) e.preventDefault(); };
   m.onclick = async (e) => {
     e.stopPropagation();
     const b = e.target.closest('button');
@@ -762,7 +1043,11 @@ function renderAttachments() {
 function syncComposer() {
   const c = state.composer;
   if ($('#c-from') && !$('.from-row').classList.contains('hidden')) c.from = $('#c-from').value;
-  c.to = $('#c-to').value; c.cc = $('#c-cc').value; c.bcc = $('#c-bcc').value; c.subject = $('#c-subject').value; c.text = $('#c-text').value;
+  c.to = $('#c-to').value; c.cc = $('#c-cc').value; c.bcc = $('#c-bcc').value; c.subject = $('#c-subject').value;
+  c.html = $('#c-body').innerHTML;
+  if ($('#c-quote')) c.quoteHtml = $('#c-quote').innerHTML;
+  const own = $('#c-body').innerText.replace(/ /g, ' ').replace(/\n{3,}/g, '\n\n').trimEnd();
+  c.text = c.quoteHtml ? `${own}${c.quoteText || `\n\n${$('#c-quote')?.innerText || ''}`}` : own;
 }
 
 async function composerAction(act, btn) {
@@ -771,14 +1056,25 @@ async function composerAction(act, btn) {
   try {
     if (act === 'close') { closeReader(); return; }
     if (act === 'attach') { $('#file-input').click(); return; }
+    if (act === 'show-quote') { $('#c-quote').classList.toggle('hidden'); btn.textContent = $('#c-quote').classList.contains('hidden') ? '⋯ Show original message' : 'Hide original message'; return; }
+    if (act === 'options') {
+      popMenu(btn, [
+        [`${c.importance === 'high' ? '✓ ' : ''}High importance`, () => { c.importance = c.importance === 'high' ? 'normal' : 'high'; renderComposeFlags(); }],
+        [`${c.importance === 'low' ? '✓ ' : ''}Low importance`, () => { c.importance = c.importance === 'low' ? 'normal' : 'low'; renderComposeFlags(); }],
+        [`${c.readReceipt ? '✓ ' : ''}Request a read receipt`, () => { c.readReceipt = !c.readReceipt; renderComposeFlags(); }],
+        ['Insert signature', () => { const b = $('#c-body'); if (!b.querySelector('.arzio-signature') && state.me.signature) b.insertAdjacentHTML('beforeend', signatureHtml()); }],
+        ['Show Bcc', () => { $$('.cc-row').forEach((r) => r.classList.remove('hidden')); $('#c-bcc').focus(); }],
+      ]);
+      return;
+    }
     if (act === 'schedule') {
       const t = new Date();
       const at = (d, h) => { const x = new Date(t); x.setDate(x.getDate() + d); x.setHours(h, 0, 0, 0); return x; };
       const go = async (when) => { await submitCompose(c, { sendAt: when }); };
       popMenu(btn, [
-        [`Tomorrow morning \u00B7 ${fmtDate(at(1, 8).toISOString(), true)}`, () => go(at(1, 8).toISOString())],
-        [`Tomorrow afternoon \u00B7 ${fmtDate(at(1, 13).toISOString(), true)}`, () => go(at(1, 13).toISOString())],
-        [`Monday morning \u00B7 ${fmtDate((() => { const x = at(1, 8); while (x.getDay() !== 1) x.setDate(x.getDate() + 1); return x; })().toISOString(), true)}`, () => { const x = at(1, 8); while (x.getDay() !== 1) x.setDate(x.getDate() + 1); return go(x.toISOString()); }],
+        [`Tomorrow morning · ${fmtDate(at(1, 8).toISOString(), true)}`, () => go(at(1, 8).toISOString())],
+        [`Tomorrow afternoon · ${fmtDate(at(1, 13).toISOString(), true)}`, () => go(at(1, 13).toISOString())],
+        [`Monday morning · ${fmtDate((() => { const x = at(1, 8); while (x.getDay() !== 1) x.setDate(x.getDate() + 1); return x; })().toISOString(), true)}`, () => { const x = at(1, 8); while (x.getDay() !== 1) x.setDate(x.getDate() + 1); return go(x.toISOString()); }],
       ], { datetime: go });
       return;
     }
@@ -786,14 +1082,14 @@ async function composerAction(act, btn) {
       const { templates } = await api('/templates');
       popMenu(btn, [
         ...templates.map((tp) => [`Insert: ${tp.name}`, () => {
-          const t = $('#c-text');
-          t.setRangeText(tp.body, t.selectionStart, t.selectionEnd, 'end');
+          restoreSel();
+          document.execCommand('insertHTML', false, textToHtml(tp.body));
           if (!$('#c-subject').value) $('#c-subject').value = tp.subject;
         }]),
         ['Save this message as a template', async () => {
           const name = prompt('Template name');
           if (!name) return;
-          await api('/templates', { method: 'POST', body: { name, subject: $('#c-subject').value, body: $('#c-text').value } });
+          await api('/templates', { method: 'POST', body: { name, subject: $('#c-subject').value, body: bodyText() } });
           toast('Template saved.');
         }],
       ]);
@@ -802,9 +1098,8 @@ async function composerAction(act, btn) {
     if (act === 'coach') {
       busy(btn, true, 'Checking');
       try {
-        const cut = quoteIndex(c.text);
-        const r = await api('/ai/coach', { method: 'POST', body: { text: cut >= 0 ? c.text.slice(0, cut) : c.text, recipients: c.to } });
-        $('#coach-out').innerHTML = `<div class="ai-card coach"><h4>\u2728 ${r.verdict === 'ready' ? 'Looks good to send' : 'Worth a second look'}</h4><p class="small">Tone: ${esc(r.tone)}</p>${r.suggestions.length ? `<ul>${r.suggestions.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>`;
+        const r = await api('/ai/coach', { method: 'POST', body: { text: bodyText(), recipients: c.to } });
+        $('#coach-out').innerHTML = `<div class="ai-card coach"><h4>✨ ${r.verdict === 'ready' ? 'Looks good to send' : 'Worth a second look'}</h4><p class="small">Tone: ${esc(r.tone)}</p>${r.suggestions.length ? `<ul>${r.suggestions.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>`;
       } finally { busy(btn, false); }
       return;
     }
@@ -814,32 +1109,30 @@ async function composerAction(act, btn) {
       state.composer = null; closeReader(); if (c.draftId) refresh(); return;
     }
     if (act === 'save') {
-      const r = await api('/drafts', { method: 'POST', body: { id: c.draftId, to: c.to, cc: c.cc, bcc: c.bcc, subject: c.subject, text: c.text, inReplyTo: c.inReplyTo, references: c.references } });
+      const p = composePayload(c);
+      const r = await api('/drafts', { method: 'POST', body: { id: c.draftId, to: c.to, cc: c.cc, bcc: c.bcc, subject: c.subject, text: c.text, html: p.html, inReplyTo: c.inReplyTo, references: c.references } });
       c.draftId = r.id; toast('Draft saved.'); loadFolders(); return;
     }
     if (act === 'ai-draft') {
       busy(btn, true, 'Writing');
       try {
         const r = await api('/ai/draft', { method: 'POST', body: { messageId: c.mode === 'forward' ? null : c.replyTo, instructions: $('#ai-instructions').value, tone: $('#ai-tone').value } });
-        const qi = quoteIndex(c.text);
-        const quoted = c.replyTo && qi >= 0 ? `\n\n${c.text.slice(qi).replace(/^\n+/, '')}` : '';
-        $('#c-text').value = `${r.body}${quoted}`;
+        setBodyText(r.body);
         if (!$('#c-subject').value && r.subject) $('#c-subject').value = r.subject;
         toast('Draft ready. Review it before sending.');
       } finally { busy(btn, false); }
       return;
     }
     if (act.startsWith('rw-')) {
-      const t = $('#c-text');
-      const hasSel = t.selectionEnd > t.selectionStart;
-      const cut = quoteIndex(c.text);
-      const target = hasSel ? t.value.slice(t.selectionStart, t.selectionEnd) : cut >= 0 ? c.text.slice(0, cut) : c.text;
+      const s = getSelection();
+      const hasSel = s.rangeCount && !s.isCollapsed && $('#c-body').contains(s.anchorNode);
+      const range = hasSel ? s.getRangeAt(0).cloneRange() : null;
+      const target = hasSel ? s.toString() : bodyText();
       if (!target.trim()) { toast('Write something first, or select text to rewrite.'); return; }
       busy(btn, true, 'Rewriting');
       try {
         const r = await api('/ai/rewrite', { method: 'POST', body: { text: target, style: act.slice(3) } });
-        if (hasSel) t.setRangeText(r.text, t.selectionStart, t.selectionEnd, 'select');
-        else t.value = cut >= 0 ? r.text + c.text.slice(cut) : r.text;
+        if (range) { $('#c-body').focus(); s.removeAllRanges(); s.addRange(range); document.execCommand('insertText', false, r.text); } else setBodyText(r.text);
       } finally { busy(btn, false); }
     }
   } catch (e) { toast(e.message); }
@@ -867,11 +1160,11 @@ function modal(html) {
 }
 function closeModal() { $('#modal').classList.add('hidden'); }
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal' || e.target.closest('[data-close]')) closeModal(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) { e.preventDefault(); closeModal(); } });
 
 // ------------------------------------------------------------ settings (tabbed)
 const SETTINGS_TABS = [
-  ['general', 'General'], ['ooo', 'Automatic replies'], ['rules', 'Rules'], ['junk', 'Junk email'],
+  ['general', 'General'], ['appearance', 'Appearance & layout'], ['ooo', 'Automatic replies'], ['rules', 'Rules'], ['junk', 'Junk email'],
   ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Phones, mail apps & AI agents'], ['import', 'Import mail'], ['billing', 'Plan & billing'],
 ];
 
@@ -908,6 +1201,8 @@ async function openSettings(tab = 'general', ruleSeed = null) {
       } catch (ex) { fail(f)(ex); }
     };
   }
+
+  if (tab === 'appearance') appearanceSettings(body);
 
   if (tab === 'ooo') {
     body.innerHTML = `<form>
@@ -1368,6 +1663,338 @@ $('#bell-btn').addEventListener('click', async (e) => {
   pollNotifications();
 });
 
+// ------------------------------------------------------------ appearance, layout and reading settings
+const ui = () => { try { return JSON.parse(state.me?.ui_json || '{}'); } catch { return {}; } };
+const ACCENTS = { blue: '#0f6cbd', teal: '#03787c', green: '#107c10', purple: '#5c2e91', pink: '#bf0077', orange: '#ca5010', gray: '#5a5a5a' };
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+function applyUi() {
+  const u = ui();
+  const root = document.documentElement;
+  root.dataset.theme = (u.theme || 'light') === 'system' ? (darkQuery.matches ? 'dark' : 'light') : (u.theme || 'light');
+  root.dataset.density = u.density || 'comfortable';
+  root.dataset.pane = u.readingPane || 'right';
+  root.dataset.textsize = u.textSize || 'medium';
+  root.classList.toggle('no-avatars', u.senderImages === false);
+  root.classList.toggle('no-preview', u.previewText === false);
+  const accent = ACCENTS[u.accent] || ACCENTS.blue;
+  root.style.setProperty('--brand', accent);
+  root.style.setProperty('--brand-dark', `color-mix(in srgb, ${accent} 82%, black)`);
+  root.style.setProperty('--brand-light', root.dataset.theme === 'dark' ? `color-mix(in srgb, ${accent} 28%, #1f1f1f)` : `color-mix(in srgb, ${accent} 10%, white)`);
+  renderFavorites();
+}
+darkQuery.addEventListener?.('change', () => { if (state.me) applyUi(); });
+
+async function saveUi(patch) {
+  const { ui: next } = await api('/me/ui', { method: 'PATCH', body: patch });
+  state.me.ui_json = JSON.stringify(next);
+  applyUi();
+  return next;
+}
+
+function appearanceSettings(body) {
+  const u = ui();
+  const radio = (name, value, label, cur) => `<label class="check"><input type="radio" name="${name}" value="${value}" ${cur === value ? 'checked' : ''}> ${label}</label>`;
+  body.innerHTML = `<form class="appearance">
+    <h3>Theme</h3>
+    <div class="row">${radio('theme', 'light', 'Light', u.theme || 'light')}${radio('theme', 'dark', 'Dark', u.theme)}${radio('theme', 'system', 'Use my device setting', u.theme)}</div>
+    <div class="swatches">${Object.entries(ACCENTS).map(([k, v]) => `<label title="${k}"><input type="radio" name="accent" value="${k}" ${(u.accent || 'blue') === k ? 'checked' : ''}><span style="background:${v}"></span></label>`).join('')}</div>
+    <h3>Layout</h3>
+    <div class="row">
+      <label>Reading pane<select name="readingPane">${[['right', 'Show on the right'], ['bottom', 'Show on the bottom'], ['off', 'Hide (open messages full page)']].map(([v, l]) => `<option value="${v}" ${(u.readingPane || 'right') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Density<select name="density">${[['roomy', 'Roomy'], ['comfortable', 'Comfortable'], ['compact', 'Compact']].map(([v, l]) => `<option value="${v}" ${(u.density || 'comfortable') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Text size<select name="textSize">${[['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']].map(([v, l]) => `<option value="${v}" ${(u.textSize || 'medium') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+    </div>
+    <label class="check"><input type="checkbox" name="conversations" ${u.conversations !== false ? 'checked' : ''}> Group messages by conversation</label>
+    <label class="check"><input type="checkbox" name="senderImages" ${u.senderImages !== false ? 'checked' : ''}> Show sender pictures in the message list</label>
+    <label class="check"><input type="checkbox" name="previewText" ${u.previewText !== false ? 'checked' : ''}> Show a preview of the message text</label>
+    <h3>Keyboard shortcuts</h3>
+    <label>Shortcut set<select name="shortcuts">${[['outlook', 'Outlook'], ['gmail', 'Gmail'], ['off', 'Turn off keyboard shortcuts']].map(([v, l]) => `<option value="${v}" ${(u.shortcuts || 'outlook') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+    <p><button type="button" class="link-btn" id="show-keys">See all keyboard shortcuts</button></p>
+    <p class="form-error"></p><div class="actions"><button class="btn" type="button" data-close>Close</button><button class="btn primary">Save</button></div></form>`;
+  const f = $('form', body);
+  $('#show-keys', f).onclick = () => showShortcuts(f.shortcuts.value);
+  // Preview theme changes straight away
+  f.onchange = () => {
+    const root = document.documentElement;
+    const t = f.theme.value;
+    root.dataset.theme = t === 'system' ? (darkQuery.matches ? 'dark' : 'light') : t;
+  };
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await saveUi({ theme: f.theme.value, accent: f.accent.value, readingPane: f.readingPane.value, density: f.density.value, textSize: f.textSize.value,
+        conversations: f.conversations.checked, senderImages: f.senderImages.checked, previewText: f.previewText.checked, shortcuts: f.shortcuts.value });
+      toast('Settings saved.'); closeModal();
+      if (state.view === 'mail') renderList();
+    } catch (ex) { $('.form-error', f).textContent = ex.message; }
+  };
+}
+
+// ------------------------------------------------------------ favorites (top of the folder pane)
+function favLabel(key) {
+  const [kind, val] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
+  if (kind === 'folder') { const f = state.folders.find((x) => x.id === Number(val)); return f ? { label: `${FOLDER_ICONS[f.role] || '\u{1F4C1}'} ${f.name}`, count: f.role === 'drafts' ? f.total : f.unread } : null; }
+  if (kind === 'smart') return { label: { flagged: '⚑ Flagged', snoozed: '⏰ Snoozed', mentions: '@ Mentions me', scheduled: '\u{1F552} Scheduled' }[val] || val };
+  return null;
+}
+function renderFavorites() {
+  const box = $('#favorites');
+  if (!box || !state.me) return;
+  const favs = (ui().favorites || []).map((k) => [k, favLabel(k)]).filter(([, v]) => v);
+  box.classList.toggle('hidden', !favs.length);
+  box.innerHTML = favs.length ? `<li class="fav-head">Favorites</li>${favs.map(([k, v]) => `<li><button data-fav="${esc(k)}"><span>${esc(v.label)}</span>${v.count ? `<span class="count">${v.count}</span>` : ''}</button></li>`).join('')}` : '';
+}
+async function toggleFavorite(key) {
+  const favs = ui().favorites || [];
+  await saveUi({ favorites: favs.includes(key) ? favs.filter((k) => k !== key) : [...favs, key] });
+  toast(favs.includes(key) ? 'Removed from Favorites.' : 'Added to Favorites.');
+}
+$('#favorites').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-fav]');
+  if (!b) return;
+  const k = b.dataset.fav;
+  if (k.startsWith('folder:')) selectFolder(Number(k.slice(7)));
+  else $(`[data-smart="${k.slice(6)}"]`)?.click();
+});
+$('#favorites').addEventListener('contextmenu', (e) => {
+  const b = e.target.closest('[data-fav]');
+  if (!b) return;
+  e.preventDefault();
+  popMenu(b, [['Remove from Favorites', () => toggleFavorite(b.dataset.fav)]]);
+});
+$$('[data-smart]').forEach((b) => b.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const key = `smart:${b.dataset.smart}`;
+  popMenu(b, [[(ui().favorites || []).includes(key) ? 'Remove from Favorites' : 'Add to Favorites', () => toggleFavorite(key)]]);
+}));
+
+// ------------------------------------------------------------ reactions (like Outlook: one per person)
+const REACTIONS = ['👍', '❤️', '🎉', '😆', '😮', '😢'];
+async function loadReactions(thread) {
+  try {
+    const { reactions } = await api('/reactions/lookup', { method: 'POST', body: { ids: thread.map((m) => m.id) } });
+    for (const [id, list] of Object.entries(reactions)) renderReactions(Number(id), list);
+  } catch { /* reactions are optional */ }
+}
+function renderReactions(id, list) {
+  const el = $(`[data-reactions="${id}"]`);
+  if (!el) return;
+  el.innerHTML = `${list.map((r) => `<button class="reaction ${r.mine ? 'mine' : ''}" data-act="react:${id}:${r.emoji}" title="${esc(r.names.join(', '))}">${r.emoji} ${r.count}</button>`).join('')}
+    <button class="reaction add" data-act="react-pick:${id}" title="React" aria-label="Add a reaction">\u{1F642}+</button>`;
+}
+
+// ------------------------------------------------------------ print
+function printMessage(message, thread) {
+  const items = thread.length > 1 ? thread : [message];
+  const frame = document.createElement('iframe');
+  frame.className = 'print-frame';
+  frame.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(frame);
+  const doc = frame.contentDocument;
+  doc.open();
+  doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(message.subject || '')}</title><style>
+    body{font-family:Segoe UI,system-ui,sans-serif;font-size:13px;color:#000;margin:24px}h1{font-size:20px}
+    .m{border-top:1px solid #999;padding:12px 0}.h{margin-bottom:10px}.h div{margin:2px 0}img{max-width:100%}pre{white-space:pre-wrap;font-family:inherit}
+  </style></head><body><h1>${esc(message.subject || '(no subject)')}</h1>
+  ${items.map((m) => `<div class="m"><div class="h"><div><b>From:</b> ${esc(fmtAddr({ name: m.from_name, address: m.from_addr }))}</div><div><b>Sent:</b> ${esc(fmtDate(m.date, true))}</div><div><b>To:</b> ${esc(people(m.to))}</div>${m.cc?.length ? `<div><b>Cc:</b> ${esc(people(m.cc))}</div>` : ''}<div><b>Subject:</b> ${esc(m.subject || '')}</div>${(m.attachments || []).filter((a) => !a.inline).length ? `<div><b>Attachments:</b> ${m.attachments.filter((a) => !a.inline).map((a) => esc(a.filename)).join(', ')}</div>` : ''}</div>
+    ${m.html_body ? cleanForEditor(m.html_body) : `<pre>${esc(m.text_body)}</pre>`}</div>`).join('')}</body></html>`);
+  doc.close();
+  setTimeout(() => { frame.contentWindow.focus(); frame.contentWindow.print(); setTimeout(() => frame.remove(), 60000); }, 300);
+}
+
+// ------------------------------------------------------------ Immersive Reader
+function openImmersive(message) {
+  const text = message.text_body || '';
+  const paras = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  const ov = document.createElement('div');
+  ov.className = 'immersive';
+  ov.setAttribute('role', 'dialog');
+  ov.setAttribute('aria-label', 'Immersive Reader');
+  ov.innerHTML = `<div class="ir-bar">
+      <strong>\u{1F4D6} Immersive Reader</strong><span class="grow"></span>
+      <button class="btn" data-ir="play">▶ Read aloud</button>
+      <label>Text size <input type="range" min="16" max="40" value="24" data-ir="size"></label>
+      <label>Spacing <select data-ir="spacing"><option value="1.6">Normal</option><option value="2.1" selected>Wide</option><option value="2.6">Wider</option></select></label>
+      <label>Font <select data-ir="font"><option value="Calibri, Segoe UI, sans-serif">Sans</option><option value="Georgia, serif">Serif</option><option value="Comic Sans MS, cursive">Comic</option></select></label>
+      <label>Theme <select data-ir="theme"><option value="paper">Paper</option><option value="sepia">Sepia</option><option value="night">Night</option></select></label>
+      <label class="check"><input type="checkbox" data-ir="focus"> Line focus</label>
+      <button class="btn" data-ir="close" aria-label="Close Immersive Reader">✕ Close</button>
+    </div>
+    <article class="ir-text" tabindex="0"><h1>${esc(message.subject || '')}</h1><p class="ir-from">${esc(message.from_name || message.from_addr)}</p>${paras.map((p, i) => `<p data-p="${i}">${esc(p).replace(/\n/g, '<br>')}</p>`).join('')}</article>`;
+  document.body.appendChild(ov);
+  const art = $('.ir-text', ov);
+  const apply = () => {
+    art.style.fontSize = `${$('[data-ir="size"]', ov).value}px`;
+    art.style.lineHeight = $('[data-ir="spacing"]', ov).value;
+    art.style.fontFamily = $('[data-ir="font"]', ov).value;
+    ov.dataset.theme = $('[data-ir="theme"]', ov).value;
+    ov.classList.toggle('line-focus', $('[data-ir="focus"]', ov).checked);
+  };
+  apply();
+  ov.oninput = apply;
+  ov.onchange = apply;
+  let speaking = false;
+  const stop = () => { speechSynthesis?.cancel(); speaking = false; $('[data-ir="play"]', ov).textContent = '▶ Read aloud'; $$('[data-p]', ov).forEach((p) => p.classList.remove('reading')); };
+  const close = () => { stop(); ov.remove(); document.removeEventListener('keydown', onKey, true); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+  ov.onclick = (e) => {
+    const b = e.target.closest('[data-ir]');
+    if (!b) return;
+    if (b.dataset.ir === 'close') close();
+    if (b.dataset.ir === 'play') {
+      if (!('speechSynthesis' in window)) { toast('Read aloud is not available in this browser.'); return; }
+      if (speaking) { stop(); return; }
+      speaking = true; b.textContent = '⏸ Stop';
+      const ps = $$('[data-p]', ov);
+      ps.forEach((p, i) => {
+        const u = new SpeechSynthesisUtterance(p.textContent);
+        u.onstart = () => { ps.forEach((x) => x.classList.remove('reading')); p.classList.add('reading'); p.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+        if (i === ps.length - 1) u.onend = stop;
+        speechSynthesis.speak(u);
+      });
+    }
+  };
+  art.focus();
+}
+
+// ------------------------------------------------------------ keyboard shortcuts (Outlook or Gmail style)
+const SHORTCUTS = {
+  outlook: [['N', 'New message'], ['R', 'Reply'], ['Shift+R', 'Reply all'], ['Shift+F', 'Forward'], ['Ctrl+Enter', 'Send'], ['Delete', 'Delete'], ['E', 'Archive'], ['Q', 'Mark as read'], ['U', 'Mark as unread'], ['Insert', 'Flag or unflag'],
+    ['↓ / ↑', 'Next or previous message'], ['Enter', 'Open message'], ['Esc', 'Close'], ['/', 'Search'], ['Ctrl+P', 'Print'], ['Ctrl+B / I / U / K', 'Bold, italic, underline, link (in a message)'], ['?', 'Show shortcuts']],
+  gmail: [['C', 'Compose'], ['R', 'Reply'], ['A', 'Reply all'], ['F', 'Forward'], ['Ctrl+Enter', 'Send'], ['#', 'Delete'], ['E', 'Archive'], ['Shift+I', 'Mark as read'], ['Shift+U', 'Mark as unread'], ['S', 'Flag or unflag'],
+    ['J / K', 'Next or previous message'], ['O / Enter', 'Open message'], ['U / Esc', 'Back to the list'], ['/', 'Search'], ['Ctrl+P', 'Print'], ['?', 'Show shortcuts']],
+};
+function showShortcuts(set = ui().shortcuts || 'outlook') {
+  if (set === 'off') { modal('<h2>Keyboard shortcuts</h2><p>Keyboard shortcuts are turned off. Turn them on in Settings, Appearance &amp; layout.</p><div class="actions"><button class="btn" data-close>Close</button></div>'); return; }
+  modal(`<h2>Keyboard shortcuts (${set === 'gmail' ? 'Gmail' : 'Outlook'})</h2><table class="keys">${SHORTCUTS[set].map(([k, d]) => `<tr><td><kbd>${esc(k)}</kbd></td><td>${esc(d)}</td></tr>`).join('')}</table>
+    <p class="muted small">Change the set in Settings, Appearance &amp; layout.</p><div class="actions"><button class="btn" data-close>Close</button></div>`);
+}
+function moveSelection(step) {
+  const i = state.messages.findIndex((m) => m.id === state.selectedId);
+  const next = state.messages[i < 0 ? 0 : i + step];
+  if (next) { openMessage(next.id); $(`.msg[data-id="${next.id}"]`)?.scrollIntoView({ block: 'nearest' }); }
+}
+document.addEventListener('keydown', (e) => {
+  if (!state.me || e.defaultPrevented) return;
+  const set = ui().shortcuts || 'outlook';
+  if (set === 'off') return;
+  if (e.target.closest('input, textarea, select, [contenteditable="true"]') || !$('#modal').classList.contains('hidden') || $('.immersive')) return;
+  const reading = !$('#reader').classList.contains('hidden') && state.current;
+  const act = (a) => { const b = $(`#reader [data-act="${a}"]`); if (b) { e.preventDefault(); b.click(); } };
+  const key = e.key;
+  if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'p' && reading) { e.preventDefault(); printMessage(state.current.message, state.current.thread); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (key === '?') { e.preventDefault(); showShortcuts(set); return; }
+  if (key === '/') { e.preventDefault(); $('#search-input').focus(); return; }
+  if (set === 'outlook') {
+    if (key === 'n') { e.preventDefault(); $('#new-mail-btn').click(); return; }
+    if (key === 'ArrowDown' && state.view === 'mail') { e.preventDefault(); moveSelection(1); return; }
+    if (key === 'ArrowUp' && state.view === 'mail') { e.preventDefault(); moveSelection(-1); return; }
+    if (!reading) return;
+    if (key === 'r') act('reply');
+    else if (key === 'R') act('replyall');
+    else if (key === 'F') act('forward');
+    else if (key === 'Delete') act('delete');
+    else if (key === 'e') act('archive');
+    else if (key === 'q') { e.preventDefault(); api(`/messages/${state.current.message.id}`, { method: 'PATCH', body: { is_read: true } }).then(() => { toast('Marked as read.'); refresh(true); }); }
+    else if (key === 'u') act('unread');
+    else if (key === 'Insert') act('flag');
+    else if (key === 'Escape') closeReader();
+  } else {
+    if (key === 'c') { e.preventDefault(); $('#new-mail-btn').click(); return; }
+    if (key === 'j' && state.view === 'mail') { e.preventDefault(); moveSelection(1); return; }
+    if (key === 'k' && state.view === 'mail') { e.preventDefault(); moveSelection(-1); return; }
+    if (key === 'o' && !reading && state.messages.length) { e.preventDefault(); openMessage((state.messages.find((m) => m.id === state.selectedId) || state.messages[0]).id); return; }
+    if (!reading) return;
+    if (key === 'r') act('reply');
+    else if (key === 'a') act('replyall');
+    else if (key === 'f') act('forward');
+    else if (key === '#') act('delete');
+    else if (key === 'e') act('archive');
+    else if (key === 'I') { e.preventDefault(); api(`/messages/${state.current.message.id}`, { method: 'PATCH', body: { is_read: true } }).then(() => { toast('Marked as read.'); refresh(true); }); }
+    else if (key === 'U') act('unread');
+    else if (key === 's') act('flag');
+    else if (key === 'u' || key === 'Escape') closeReader();
+  }
+});
+
+// ------------------------------------------------------------ shared calendars
+const SHARE_ROLES = { freebusy: 'Can view when I’m busy', view: 'Can view all details', edit: 'Can edit' };
+const OTHER_COLORS = ['#ca5010', '#107c10', '#8764b8', '#c239b3', '#038387', '#986f0b'];
+const shownCalendars = () => { try { return JSON.parse(localStorage.getItem('arzio-shown-calendars') || '[]'); } catch { return []; } };
+
+async function shareCalendarDialog(pane) {
+  const { given } = await api('/calendar/shares');
+  const m = modal(`<h2>Share your calendar</h2>
+    <form id="share-form" class="row"><label>Person<input name="email" placeholder="name@${esc(state.service.domain)}" required></label>
+    <label>Permission<select name="role">${Object.entries(SHARE_ROLES).map(([k, l]) => `<option value="${k}" ${k === 'view' ? 'selected' : ''}>${l}</option>`).join('')}</select></label><button class="btn primary">Share</button></form>
+    <p class="form-error"></p>
+    ${given.length ? `<table class="people"><thead><tr><th>Shared with</th><th>Permission</th><th></th></tr></thead><tbody>${given.map((g) => `<tr><td>${esc(g.name)} <span class="muted small">${esc(g.email)}</span></td><td>${SHARE_ROLES[g.role]}</td><td><button class="link-btn" data-unshare="${g.id}">Remove</button></td></tr>`).join('')}</tbody></table>` : '<p class="muted">Your calendar is not shared with anyone yet.</p>'}
+    <div class="actions"><button class="btn" data-close>Close</button></div>`);
+  attachAutocomplete($('#share-form input[name="email"]', m));
+  $('#share-form', m).onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await api('/calendar/shares', { method: 'POST', body: { email: (f.email.value.match(/<([^>]+)>/)?.[1] || f.email.value).replace(/[,;\s]+$/, '').trim(), role: f.role.value } });
+      toast('Calendar shared. They have been sent an email.'); shareCalendarDialog(pane);
+    } catch (ex) { $('.form-error', m).textContent = ex.message; }
+  };
+  m.onclick = async (e) => {
+    const b = e.target.closest('[data-unshare]');
+    if (b) { await api(`/calendar/shares/${b.dataset.unshare}`, { method: 'DELETE' }); shareCalendarDialog(pane); }
+  };
+}
+
+async function otherCalendarsDialog(pane) {
+  const { received } = await api('/calendar/shares');
+  const shown = shownCalendars();
+  const m = modal(`<h2>People's calendars</h2>
+    ${received.length ? `<form>${received.map((r, i) => `<label class="check"><input type="checkbox" value="${r.owner_id}" ${shown.includes(r.owner_id) ? 'checked' : ''}> <span class="cal-dot" style="background:${OTHER_COLORS[i % OTHER_COLORS.length]}"></span> ${esc(r.name)} <span class="muted small">${esc(r.email)} · ${SHARE_ROLES[r.role]}</span></label>`).join('')}</form>`
+      : '<p class="muted">Nobody has shared a calendar with you yet. When someone does, it appears here.</p>'}
+    <div class="actions"><button class="btn" data-close>Close</button></div>`);
+  m.onchange = () => {
+    localStorage.setItem('arzio-shown-calendars', JSON.stringify($$('input[type="checkbox"]:checked', m).map((x) => Number(x.value))));
+    VIEWS.calendar(pane);
+  };
+}
+
+async function sharedEvents(from, to) {
+  const shown = shownCalendars();
+  const { received } = await api('/calendar/shares').catch(() => ({ received: [] }));
+  cal.editable = received.filter((r) => r.role === 'edit');
+  const out = [];
+  await Promise.all(received.map(async (r, i) => {
+    if (!shown.includes(r.owner_id)) return;
+    try {
+      const { events, role } = await api(`/calendar/shared/${r.owner_id}/events?from=${from.toISOString()}&to=${to.toISOString()}`);
+      for (const e of events) out.push({ ...e, owner: { id: r.owner_id, name: r.name, role }, color: OTHER_COLORS[i % OTHER_COLORS.length], my_status: 'organizer' });
+    } catch { /* access removed */ }
+  }));
+  return { events: out, received };
+}
+
+function showSharedEvent(e, pane) {
+  const canEdit = e.owner.role === 'edit';
+  const m = modal(`<h2>${esc(e.title || '(no title)')}</h2>
+    <p class="muted small">${esc(e.owner.name)}'s calendar</p>
+    <p>${esc(fmtWhen(e.start_at, e.end_at, e.all_day))}</p>
+    ${e.location ? `<p>\u{1F4CD} ${esc(e.location)}</p>` : ''}
+    ${e.description ? `<p class="pre">${esc(e.description)}</p>` : ''}
+    ${e.busy_only ? '<p class="muted small">Only free/busy times are shared.</p>' : ''}
+    <div class="actions"><span class="grow"></span>${canEdit ? '<button class="btn" data-se="edit">Edit</button><button class="btn danger" data-se="delete">Delete</button>' : ''}<button class="btn" data-close>Close</button></div>`);
+  m.onclick = async (ev) => {
+    const b = ev.target.closest('[data-se]');
+    if (!b) return;
+    try {
+      if (b.dataset.se === 'edit') { closeModal(); editEvent(e, pane, { owner: e.owner }); }
+      if (b.dataset.se === 'delete' && confirm(`Delete this event from ${e.owner.name}'s calendar?`)) { await api(`/calendar/shared/${e.owner.id}/events/${e.id}`, { method: 'DELETE' }); closeModal(); VIEWS.calendar(pane); }
+    } catch (ex) { toast(ex.message); }
+  };
+}
+
 // ------------------------------------------------------------ Calendar
 const cal = { view: 'week', date: new Date() };
 const HOUR_PX = 44;
@@ -1389,7 +2016,9 @@ VIEWS.calendar = async (pane, opts = {}) => {
   if (opts.date) cal.date = new Date(opts.date);
   if (window.innerWidth < 760 && cal.view === 'week') cal.view = 'day';
   const [from, to] = calRange();
-  const { events } = await api(`/calendar/events?from=${from.toISOString()}&to=${to.toISOString()}`);
+  const [{ events: mine }, shared] = await Promise.all([api(`/calendar/events?from=${from.toISOString()}&to=${to.toISOString()}`), sharedEvents(from, to)]);
+  const events = [...mine, ...shared.events];
+  cal.shared = shared.events;
   const title = cal.view === 'month' ? cal.date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
     : cal.view === 'day' ? cal.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
       : `${from.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${addDays(to, -1).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
@@ -1400,6 +2029,8 @@ VIEWS.calendar = async (pane, opts = {}) => {
       <h2>${esc(title)}</h2>
       <span class="grow"></span>
       <div class="seg">${['day', 'week', 'month'].map((v) => `<button data-calview="${v}" class="${cal.view === v ? 'active' : ''}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
+      <button class="btn" data-cal="others" title="Calendars other people shared with you">\u{1F465} People's calendars</button>
+      <button class="btn" data-cal="share" title="Share your calendar">Share</button>
       <label class="btn" title="Import an .ics file">Import<input type="file" accept=".ics,text/calendar" hidden id="ics-file"></label>
     </div>
     <div class="cal-body">${cal.view === 'month' ? monthGrid(from, events) : timeGrid(from, cal.view === 'day' ? 1 : 7, events)}</div>`;
@@ -1414,6 +2045,9 @@ VIEWS.calendar = async (pane, opts = {}) => {
     const b = e.target.closest('[data-cal], [data-calview], [data-ev], [data-slot], [data-day]');
     if (!b) return;
     if (b.dataset.cal === 'new') editEvent({}, pane);
+    if (b.dataset.cal === 'share') shareCalendarDialog(pane);
+    if (b.dataset.cal === 'others') otherCalendarsDialog(pane);
+    if (b.dataset.ev && b.dataset.owner) { e.stopPropagation(); showSharedEvent(cal.shared.find((x) => String(x.id) === b.dataset.ev && String(x.owner.id) === b.dataset.owner), pane); return; }
     if (b.dataset.cal === 'today') { cal.date = new Date(); VIEWS.calendar(pane); }
     if (b.dataset.cal === 'prev') nav(-1);
     if (b.dataset.cal === 'next') nav(1);
@@ -1431,8 +2065,8 @@ VIEWS.calendar = async (pane, opts = {}) => {
 
 function evChip(e, extraStyle = '') {
   const cls = ['ev', STATUS_CLASS[e.my_status] || '', e.show_as === 'free' ? 'free' : ''].join(' ');
-  return `<div class="${cls}" data-ev="${e.id}" style="${extraStyle}${e.color ? `--ev:${esc(e.color)};` : ''}" title="${esc(e.title)}">
-    <strong>${esc(e.title || '(no title)')}</strong>${e.all_day ? '' : ` <span>${timeLabel(e.start_at)}</span>`}${e.location ? `<div class="small">${esc(e.location)}</div>` : ''}</div>`;
+  return `<div class="${cls}${e.owner ? ' shared' : ''}" data-ev="${e.id}" ${e.owner ? `data-owner="${e.owner.id}"` : ''} style="${extraStyle}${e.color ? `--ev:${esc(e.color)};` : ''}" title="${esc(e.owner ? `${e.owner.name}: ${e.title}` : e.title)}">
+    <strong>${e.owner ? `<span class="owner">${esc(e.owner.name.split(' ')[0])}:</span> ` : ''}${esc(e.title || '(no title)')}</strong>${e.all_day ? '' : ` <span>${timeLabel(e.start_at)}</span>`}${e.location ? `<div class="small">${esc(e.location)}</div>` : ''}</div>`;
 }
 
 function timeGrid(from, days, events) {
@@ -1529,11 +2163,13 @@ async function showEvent(id, pane) {
   };
 }
 
-function editEvent(e, pane) {
+function editEvent(e, pane, opts = {}) {
+  const editable = (cal.editable || []);
   const start = e.start_at ? new Date(e.start_at) : (() => { const d = new Date(); d.setMinutes(d.getMinutes() < 30 ? 30 : 60, 0, 0); return d; })();
   const end = e.end_at ? new Date(e.end_at) : new Date(start.getTime() + 3600e3);
   const reminders = [[null, 'None'], [0, 'At start'], [5, '5 minutes before'], [15, '15 minutes before'], [30, '30 minutes before'], [60, '1 hour before'], [1440, '1 day before']];
-  const m = modal(`<h2>${e.id ? 'Edit event' : 'New event'}</h2><form id="ev-form">
+  const m = modal(`<h2>${e.id ? 'Edit event' : 'New event'}${opts.owner ? ` <span class="muted small">in ${esc(opts.owner.name)}'s calendar</span>` : ''}</h2><form id="ev-form">
+    ${!e.id && editable.length ? `<label>Calendar<select name="owner"><option value="">My calendar</option>${editable.map((r) => `<option value="${r.owner_id}">${esc(r.name)}</option>`).join('')}</select></label>` : ''}
     <label>Title<input name="title" value="${esc(e.title || '')}" required></label>
     <label>Invite attendees<input name="attendees" value="${esc((e.attendees || []).map((a) => a.email).join(', '))}" placeholder="name@example.com, …"></label>
     <div class="row"><label>Start<input type="datetime-local" name="start" value="${toLocalInput(start)}" required></label><label>End<input type="datetime-local" name="end" value="${toLocalInput(end)}" required></label></div>
@@ -1580,7 +2216,9 @@ function editEvent(e, pane) {
       reminder_minutes: f.reminder_minutes.value === '' ? null : Number(f.reminder_minutes.value), show_as: f.show_as.value, description: f.description.value,
     };
     try {
-      await api(e.id ? `/calendar/events/${e.id}` : '/calendar/events', { method: e.id ? 'PUT' : 'POST', body });
+      const owner = opts.owner?.id || (f.owner && f.owner.value) || '';
+      const base = owner ? `/calendar/shared/${owner}/events` : '/calendar/events';
+      await api(e.id ? `${base}/${e.id}` : base, { method: e.id ? 'PUT' : 'POST', body });
       closeModal();
       toast(body.attendees.length ? 'Invitations sent.' : 'Saved.');
       cal.date = s;
@@ -1959,12 +2597,5 @@ VIEWS.admin = async (pane, opts = {}) => {
   }
 };
 
-document.addEventListener('keydown', (e) => {
-  if (!state.me || e.target.matches('input, textarea, select') || !$('#modal').classList.contains('hidden')) return;
-  if (e.key === 'n') { e.preventDefault(); $('#new-mail-btn').click(); }
-  if (e.key === '/') { e.preventDefault(); $('#search-input').focus(); }
-  if (e.key === 'r' && !$('#reader').classList.contains('hidden')) $('[data-act="reply"]')?.click();
-  if (e.key === 'Delete' && !$('#reader').classList.contains('hidden')) $('[data-act="delete"]')?.click();
-});
 
 boot();

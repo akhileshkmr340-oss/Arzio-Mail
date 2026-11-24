@@ -134,7 +134,7 @@ export function storeMessage(userId, msg) {
 }
 
 const LIST_COLS = `id, folder_id, thread_id, from_addr, from_name, to_json, subject, snippet, date, is_read, is_flagged, is_pinned,
-  is_focused, categories_json, has_attachments, ai_priority, ai_category, ai_needs_reply, snooze_until, spam_score`;
+  is_focused, categories_json, has_attachments, ai_priority, ai_category, ai_needs_reply, snooze_until, spam_score, importance, mentions_me`;
 
 function hydrate(row) {
   if (!row) return row;
@@ -142,7 +142,7 @@ function hydrate(row) {
   for (const k of ['to_json', 'cc_json', 'bcc_json', 'categories_json']) {
     if (k in out) { out[k.replace('_json', '')] = JSON.parse(out[k] || '[]'); delete out[k]; }
   }
-  for (const k of ['is_read', 'is_flagged', 'is_pinned', 'is_focused', 'has_attachments']) if (k in out) out[k] = !!out[k];
+  for (const k of ['is_read', 'is_flagged', 'is_pinned', 'is_focused', 'has_attachments', 'mentions_me']) if (k in out) out[k] = !!out[k];
   if ('ai_needs_reply' in out && out.ai_needs_reply !== null) out.ai_needs_reply = !!out.ai_needs_reply;
   return out;
 }
@@ -159,7 +159,7 @@ export function recoverableFolder(userId) {
   return f;
 }
 
-export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 0, flagged, snoozed, category, unread }) {
+export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 0, flagged, snoozed, category, unread, mentions }) {
   const where = ['m.user_id = ?'];
   const args = [userId];
   let from = 'messages m';
@@ -175,6 +175,7 @@ export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 
   else where.push('m.snooze_until IS NULL');
   if (category) { where.push("m.categories_json LIKE ?"); args.push(`%${JSON.stringify(String(category)).slice(1, -1)}%`); }
   if (unread) where.push('m.is_read = 0');
+  if (mentions) where.push('m.mentions_me = 1');
   if (focus === 'focused') where.push('m.is_focused = 1');
   if (focus === 'other') where.push('m.is_focused = 0');
   const sql = `SELECT ${LIST_COLS.split(',').map((c) => 'm.' + c.trim()).join(', ')} FROM ${from}
@@ -194,7 +195,7 @@ export function ftsQuery(q) {
 export const FTS_MATCH = db.dialect === 'postgres' ? "f.tsv @@ to_tsquery('simple', ?)" : 'messages_fts MATCH ?';
 const FTS_ORDER = db.dialect === 'postgres' ? 'm.date DESC' : 'bm25(messages_fts), m.date DESC';
 
-export function getMessage(userId, id) {
+export function getMessage(userId, id, { inlineData = false } = {}) {
   const m = db.prepare('SELECT * FROM messages WHERE user_id = ? AND id = ?').get(userId, Number(id));
   if (!m) return null;
   const out = hydrate(m);
@@ -206,7 +207,25 @@ export function getMessage(userId, id) {
   }
   delete out.calendar_json;
   delete out.raw_path;
-  out.attachments = db.prepare('SELECT id, filename, content_type, size FROM attachments WHERE message_id = ?').all(m.id);
+  const atts = db.prepare('SELECT id, filename, content_type, size, content_id FROM attachments WHERE message_id = ?').all(m.id);
+  // Inline pictures (cid:) point at the attachment download and are not listed as files
+  if (out.html_body && /cid:/i.test(out.html_body)) {
+    for (const a of atts) {
+      const cid = String(a.content_id || '').replace(/^<|>$/g, '');
+      if (!cid) continue;
+      const re = new RegExp(`cid:${cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'gi');
+      if (!re.test(out.html_body)) continue;
+      let src = `/api/attachments/${a.id}?inline=1`;
+      // The phone app cannot send its session with pictures, so it gets them embedded
+      if (inlineData && /^image\//i.test(a.content_type) && a.size <= 2 * 1024 * 1024) {
+        const bytes = blobs.get(db.prepare('SELECT storage_path FROM attachments WHERE id = ?').get(a.id).storage_path);
+        if (bytes) src = `data:${a.content_type};base64,${bytes.toString('base64')}`;
+      }
+      out.html_body = out.html_body.replace(re, src);
+      a.inline = true;
+    }
+  }
+  out.attachments = atts.map(({ content_id, ...a }) => a);
   return out;
 }
 

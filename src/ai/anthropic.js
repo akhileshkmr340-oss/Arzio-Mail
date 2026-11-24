@@ -119,6 +119,12 @@ export function anthropicProvider(model) {
         prompt: `${task}\nTone: ${tone}.\nWhat the owner wants to say: ${instructions || '(no specific instructions: write a sensible, helpful reply)'}\nDo not invent facts, dates or commitments the owner did not give; use [brackets] for details they need to fill in. End with the owner's first name only.${context ? `\n\n<email>\n${context}\n</email>` : ''}`,
       });
     },
+    async translate({ text, to }) {
+      return ask({
+        effort: 'low',
+        prompt: `Translate the email below into ${to}. Keep the line breaks and the meaning; do not add notes. Return only the translation.\n\n<email>\n${text}\n</email>`,
+      });
+    },
     async rewrite({ text, style }) {
       const styles = { improve: 'clearer and more polished', shorten: 'about half as long, keeping every key point', formal: 'more formal', friendly: 'warmer and more friendly' };
       return ask({

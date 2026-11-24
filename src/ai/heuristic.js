@@ -61,6 +61,9 @@ export const heuristicProvider = {
     }
     return { subject: '', body: `Hi [name],\n\n${instructions || '[Your message here]'}\n\nBest regards,\n${first}` };
   },
+  async translate() {
+    throw Object.assign(new Error('Translation needs an AI provider. Ask the administrator to set ANTHROPIC_API_KEY.'), { status: 400 });
+  },
   async rewrite({ text, style }) {
     if (style === 'shorten') return sentences(text).slice(0, Math.max(1, Math.ceil(sentences(text).length / 2))).join(' ');
     return text;

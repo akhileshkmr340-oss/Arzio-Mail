@@ -50,6 +50,14 @@ export async function seedDemo() {
   await createEvent(me, { title: 'Team stand-up', start_at: day(0, 4), end_at: day(0, 4).replace('T04:00', 'T04:15'), recurrence: 'daily' });
   await createEvent(me, { title: 'Lunch with Ravi', location: 'Cafe Mocha', start_at: day(2, 7), end_at: day(2, 8) });
 
+  const contact = db.prepare('INSERT INTO contacts (user_id, email, name, company, job_title, is_saved) VALUES (?, ?, ?, ?, ?, 1)');
+  contact.run(me.id, priya.email, 'Priya Sharma', 'Arzio', 'Design lead');
+  contact.run(me.id, 'ravi@example.com', 'Ravi Kumar', 'Northwind', 'Finance manager');
+  contact.run(me.id, 'anita@example.org', 'Anita Desai', 'Contoso Legal', 'Counsel');
+  // Priya shares her calendar with the demo user so "People's calendars" has something to show
+  db.prepare("INSERT INTO calendar_shares (owner_id, grantee_id, role) VALUES (?, ?, 'view')").run(priya.id, me.id);
+  await createEvent(priya, { title: 'Design sync', start_at: day(1, 9), end_at: day(1, 10) });
+
   const task = db.prepare('INSERT INTO tasks (user_id, title, notes, due_at, important) VALUES (?, ?, ?, ?, ?)');
   task.run(me.id, 'Send Q3 numbers to Ravi', '', day(2, 12), 1);
   task.run(me.id, 'Review contract draft', 'Payment terms, renewal, support hours', day(1, 12), 0);

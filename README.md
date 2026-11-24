@@ -11,10 +11,13 @@ It has built-in AI (Claude by default): thread summaries with action items, repl
 
 | Area | Features |
 | --- | --- |
-| Mail | Inbox, Drafts, Sent Items, Archive, Junk, Deleted Items, custom folders; compose, reply, reply all, forward; attachments; threading; read/unread, flag, pin, categories; drag to folder; signatures; templates |
+| Mail | Inbox, Drafts, Sent Items, Archive, Junk, Deleted Items, custom folders, Favorites; reply, reply all, forward; attachments; conversation view (on or off); read/unread, flag, pin, categories; drag to folder; signatures; templates; print; reactions (👍 ❤️ 🎉 😆 😮 😢) shared with everyone on the message |
+| Writing | Rich-text editor like Outlook: fonts, sizes, colours, highlight, lists, indent, alignment, quotes, links, tables, emoji, pasted or dropped pictures sent inline; @mentions that add the person to To and show "@" in their inbox; importance (high / low); read receipts; check for a missing attachment or subject |
+| Reading | Translator (via Claude), Immersive Reader (text size, spacing, fonts, themes, line focus, read aloud), "Mentions me" view, read-receipt prompt |
+| Appearance | Light, dark or device theme; seven accent colours; reading pane on the right, at the bottom or hidden; roomy, comfortable or compact density; text size; sender pictures and preview text on or off; Outlook or Gmail keyboard shortcuts (press ? for the list) |
 | Inbox | Focused / Other, AI priority and "needs reply" tags, full-text search, snooze, sweep, inbox rules, automatic replies (out of office), safe and blocked senders |
 | Sending | Undo send, scheduled send, send as alias / shared mailbox / on behalf of, contacts autocomplete, retrying delivery queue with bounce notices |
-| Calendar | Day, week and month views; meeting invitations to anyone (iCalendar, works with Outlook and Gmail); accept / tentative / decline; updates and cancellations; recurring events; reminders; scheduling assistant (free/busy for colleagues); .ics import; private subscription link for Google / Apple / Outlook calendars |
+| Calendar | Day, week and month views; share your calendar (free/busy, all details, or edit) and show people's calendars side by side; meeting invitations to anyone (iCalendar, works with Outlook and Gmail); accept / tentative / decline; updates and cancellations; recurring events; reminders; scheduling assistant (free/busy for colleagues); .ics import; private subscription link for Google / Apple / Outlook calendars |
 | To Do | Task lists, due dates, reminders, important, flagged email as tasks, "Add to To Do" from any message |
 | People | Contacts with vCard export; suggested recipients from your mail and your organization directory |
 | AI | Summarize, draft and rewrite, triage, writing coach, "Ask Arzio" questions over your mailbox, meeting prep briefs. Claude by default, pluggable; a basic built-in fallback works without a key |

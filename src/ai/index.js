@@ -75,3 +75,8 @@ export async function meetingBrief({ event, sources }) {
   const ctx = sources.map((m) => `[#${m.id}] ${formatMessage(m).slice(0, 2500)}`).join('\n\n---\n\n').slice(0, MAX_INPUT_CHARS);
   return provider.meetingBrief({ event, context: ctx, sources });
 }
+
+/** Translate a message into another language (Outlook's Translator). */
+export async function translate({ text, to }) {
+  return provider.translate({ text: String(text).slice(0, 30000), to: String(to).slice(0, 40) });
+}

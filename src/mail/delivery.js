@@ -16,6 +16,7 @@ import { resolveRecipient, checkInbound, senderListMatch, applyRules, shouldAuto
 import { triage } from '../ai/index.js';
 import { audit } from '../audit.js';
 import { applyTransportRules } from './transport-rules.js';
+import { cleanHtml, inlineImages, textToHtml, mentionedAddresses } from './html.js';
 import { handleInboundCalendar, processReminders } from '../calendar/service.js';
 
 const OUTBOX_DIR = path.join(config.dataDir, 'outbox');
@@ -67,7 +68,7 @@ function expandRecipients(recipients, senderAddr) {
  * Returns the list of mailbox addresses it was delivered to.
  */
 export async function deliverRaw(raw, recipients, smtp = {}) {
-  const parsed = await simpleParser(raw, { skipHtmlToText: false });
+  const parsed = await simpleParser(raw, { skipHtmlToText: false, keepCidLinks: true });
   const from = addrList(parsed.from)[0] || { address: '', name: '' };
   const check = smtp.ip ? await checkInbound(raw, parsed, smtp) : { score: 0, reasons: [], auth: null };
   const delivered = [];
@@ -95,6 +96,15 @@ export async function deliverRaw(raw, recipients, smtp = {}) {
       attachments: (parsed.attachments || []).filter((a) => !(/^text\/calendar/i.test(a.contentType || '') && !a.filename)).map((a) => ({ filename: a.filename, contentType: a.contentType, content: a.content, contentId: a.contentId })),
     });
     db.prepare('UPDATE messages SET spam_score = ?, auth_results = ? WHERE id = ?').run(check.score, check.auth ? JSON.stringify({ ...check.auth, reasons: check.reasons }) : null, id);
+    // Outlook extras: importance, read-receipt request, @mentions of this user
+    const prio = String(parsed.headers.get('priority') || parsed.headers.get('importance') || '').toLowerCase();
+    const importance = prio === 'high' || prio === 'low' ? prio : null;
+    const dnt = addrList(parsed.headers.get('disposition-notification-to'))[0]?.address || null;
+    const mentionsMe = typeof parsed.html === 'string' && mentionedAddresses(parsed.html).includes(user.email.toLowerCase()) ? 1 : 0;
+    if (importance || dnt || mentionsMe) {
+      db.prepare('UPDATE messages SET importance = ?, receipt_to = ?, mentions_me = ? WHERE id = ?')
+        .run(importance, dnt && dnt.toLowerCase() !== user.email.toLowerCase() && !junk ? dnt : null, mentionsMe, id);
+    }
     delivered.push(user.email);
     audit(user.id, 'mail.received', { messageId: id, from: from.address, to: user.email, subject: parsed.subject || '', junk });
     if (!junk) pushToUser(user.id, { title: from.name || from.address || 'New message', body: parsed.subject || '(no subject)', data: { type: 'mail', messageId: id } });
@@ -357,11 +367,27 @@ export async function performSend(user, input) {
   const fromDomain = domainOf(fromAddr);
   const messageId = `<${crypto.randomUUID()}@${fromDomain}>`;
   let text = String(input.text || '');
-  if (user.signature && !input.html && !input.noSignature) text = `${text}\n\n-- \n${user.signature}`;
+  // Rich text from the composer: cleaned, pasted pictures sent as inline attachments
+  let html = '';
+  if (input.html) {
+    const inl = inlineImages(cleanHtml(input.html), fromDomain);
+    html = inl.html;
+    attachments.push(...inl.attachments);
+  }
+  if (user.signature && !input.noSignature) {
+    text = `${text}\n\n-- \n${user.signature}`;
+    if (html) html = `${html}<div class="arzio-signature"><br>-- <br>${textToHtml(user.signature)}</div>`;
+  }
+  const extraHeaders = {};
+  if (input.importance === 'high') Object.assign(extraHeaders, { Importance: 'High', 'X-Priority': '1 (Highest)' });
+  if (input.importance === 'low') Object.assign(extraHeaders, { Importance: 'Low', 'X-Priority': '5 (Lowest)' });
+  if (input.readReceipt) extraHeaders['Disposition-Notification-To'] = fromAddr;
 
   // Organization mail flow rules (disclaimers, blocks)
   const flow = applyTransportRules(user, { to: all, subject: input.subject, text });
   if (flow.block) throw httpErr(403, flow.block);
+  const added = flow.text.startsWith(text) ? flow.text.slice(text.length).trim() : '';
+  if (html && added) html = `${html}<div class="arzio-disclaimer"><br>${textToHtml(added)}</div>`;
   text = flow.text;
 
   const mailOptions = {
@@ -371,13 +397,13 @@ export async function performSend(user, input) {
     cc: cc.map((p) => ({ name: p.name, address: p.address })),
     subject: String(input.subject || '').slice(0, 998),
     text,
-    html: input.html || undefined,
+    html: html || undefined,
     attachments,
     messageId,
     inReplyTo: input.inReplyTo || undefined,
     references: input.references || undefined,
     date: new Date(),
-    headers: { 'X-Mailer': 'Arzio Mail', ...(input.headers || {}) },
+    headers: { 'X-Mailer': 'Arzio Mail', ...extraHeaders, ...(input.headers || {}) },
     icalEvent: input.icalEvent || undefined,
   };
   const compiled = new MailComposer(mailOptions).compile();
@@ -389,9 +415,10 @@ export async function performSend(user, input) {
   const sentId = storeMessage(mailboxId, {
     folderRole: 'sent', messageId, inReplyTo: input.inReplyTo, refs: input.references,
     from: { address: fromAddr, name: fromName }, to, cc, bcc,
-    subject: mailOptions.subject, text, html: input.html || '', date: mailOptions.date, isRead: true, size: raw.length, raw,
-    attachments,
+    subject: mailOptions.subject, text, html, date: mailOptions.date, isRead: true, size: raw.length, raw,
+    attachments: attachments.map((a) => ({ ...a, contentId: a.cid })),
   });
+  if (input.importance === 'high' || input.importance === 'low') db.prepare('UPDATE messages SET importance = ? WHERE id = ?').run(input.importance, sentId);
   db.prepare('INSERT INTO send_log (user_id) VALUES (?)').run(user.id);
   recordContacts(user.id, all);
   audit(user.id, 'mail.sent', { messageId: sentId, from: fromAddr, to: all.map((p) => p.address), subject: mailOptions.subject });

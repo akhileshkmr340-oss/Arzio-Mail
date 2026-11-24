@@ -68,8 +68,10 @@
     <div class="layout">
       <nav class="sidebar" id="sidebar">
         <button class="btn primary new-mail" id="new-mail-btn">&#9998; New mail</button>
+        <ul class="folders favorites hidden" id="favorites" aria-label="Favorites"></ul>
         <ul class="folders" id="folder-list"></ul>
         <ul class="folders smart">
+          <li><button data-smart="mentions">@ Mentions me</button></li>
           <li><button data-smart="flagged">&#9873; Flagged</button></li>
           <li><button data-smart="snoozed">&#9200; Snoozed</button></li>
           <li><button data-smart="scheduled">&#128339; Scheduled</button></li>

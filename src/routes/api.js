@@ -11,6 +11,8 @@ import {
   getUser, hashPassword, verifyPassword, validatePassword, httpError,
 } from '../auth.js';
 import * as store from '../mail/store.js';
+import { cleanHtml } from '../mail/html.js';
+import { owa } from './owa.js';
 import { sendMail, deliverRaw, parseRecipients } from '../mail/delivery.js';
 import * as ai from '../ai/index.js';
 import { audit } from '../audit.js';
@@ -146,12 +148,12 @@ api.delete('/folders/:id', wrap(async (req, res) => { store.deleteFolder(req.mbx
 
 // ------------------------------------------------------------ messages
 api.get('/messages', (req, res) => {
-  const { folder, focus, q, offset, limit, flagged, snoozed, category, unread } = req.query;
-  res.json({ messages: store.listMessages(req.mbx, { folderId: folder, focus, q, offset, limit, flagged: flagged === '1', snoozed: snoozed === '1', category, unread: unread === '1' }) });
+  const { folder, focus, q, offset, limit, flagged, snoozed, category, unread, mentions } = req.query;
+  res.json({ messages: store.listMessages(req.mbx, { folderId: folder, focus, q, offset, limit, flagged: flagged === '1', snoozed: snoozed === '1', category, unread: unread === '1', mentions: mentions === '1' }) });
 });
 
 api.get('/messages/:id', (req, res) => {
-  const m = store.getMessage(req.mbx, req.params.id);
+  const m = store.getMessage(req.mbx, req.params.id, { inlineData: !!req.headers['x-arzio-session'] && !req.query.links });
   if (!m) return res.status(404).json({ error: 'Message not found.' });
   if (!m.is_read) { store.updateMessage(req.mbx, m.id, { is_read: true }); m.is_read = true; }
   res.json({ message: m });
@@ -195,7 +197,8 @@ api.get('/attachments/:id', (req, res) => {
   const a = store.getAttachment(req.mbx, req.params.id);
   if (!a) return res.status(404).json({ error: 'Attachment not found.' });
   res.setHeader('Content-Type', a.content_type);
-  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(a.filename)}`);
+  const inline = req.query.inline === '1' && /^image\/(png|jpe?g|gif|webp|bmp)$/i.test(a.content_type);
+  res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(a.filename)}`);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   blobs.send(res, a.storage_path);
 });
@@ -217,7 +220,7 @@ api.post('/drafts', wrap(async (req, res) => {
   }
   const id = store.storeMessage(req.user.id, {
     folderRole: 'drafts', from: { address: req.user.email, name: req.user.name },
-    to: safe(b.to), cc: safe(b.cc), bcc: safe(b.bcc), subject: b.subject || '', text: b.text || '', isRead: true,
+    to: safe(b.to), cc: safe(b.cc), bcc: safe(b.bcc), subject: b.subject || '', text: b.text || '', html: b.html ? cleanHtml(b.html) : '', isRead: true,
     inReplyTo: b.inReplyTo, refs: b.references,
   });
   res.json({ id });
@@ -266,6 +269,7 @@ api.post('/ai/triage', wrap(async (req, res) => {
   res.json(t);
 }));
 
+api.use(owa);
 api.use(features);
 api.use(calendar);
 api.use(admin);
