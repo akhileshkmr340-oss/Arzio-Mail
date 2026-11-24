@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arzio Mail</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f6cbd'/%3E%3Cpath d='M7 10h18v12H7z' fill='none' stroke='white' stroke-width='2'/%3E%3Cpath d='M7 10l9 7 9-7' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+</head>
+<body>
+  <!-- Sign in / sign up -->
+  <section id="auth-view" class="auth hidden">
+    <div class="auth-card">
+      <div class="brand-lg"><span class="logo">A</span> <span class="service-name">Arzio Mail</span></div>
+      <form id="login-form">
+        <h1>Sign in</h1>
+        <label>Email or username<input name="email" autocomplete="username" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+        <p class="form-error" role="alert"></p>
+        <button class="btn primary wide" type="submit">Sign in</button>
+        <p class="muted center signup-link">New here? <a href="#" data-auth="signup">Create a free account</a></p>
+      </form>
+      <form id="signup-form" class="hidden">
+        <h1>Create your account</h1>
+        <label>Your name<input name="name" autocomplete="name" required></label>
+        <label>Choose your address
+          <span class="addr-input"><input name="username" autocomplete="username" required pattern="[A-Za-z0-9._\-]{3,32}"><span class="addr-domain">@arzio</span></span>
+        </label>
+        <label>Password<input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+        <p class="form-error" role="alert"></p>
+        <button class="btn primary wide" type="submit">Create account</button>
+        <p class="muted center">Already have an account? <a href="#" data-auth="login">Sign in</a></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- Main app -->
+  <section id="app-view" class="app hidden">
+    <header class="topbar">
+      <button class="icon-btn menu-toggle" id="nav-toggle" aria-label="Toggle folders">&#9776;</button>
+      <div class="brand"><span class="logo">A</span><span class="service-name">Arzio Mail</span></div>
+      <form class="search" id="search-form" role="search">
+        <input id="search-input" type="search" placeholder="Search mail and people" aria-label="Search">
+      </form>
+      <div class="top-actions">
+        <span class="ai-badge" id="ai-badge" title="AI provider"></span>
+        <button class="icon-btn" id="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
+        <div class="avatar-menu">
+          <button class="avatar" id="avatar-btn" aria-haspopup="true"></button>
+          <div class="dropdown hidden" id="avatar-dropdown">
+            <div class="dd-head"><strong id="me-name"></strong><span id="me-email" class="muted"></span><span id="me-org" class="muted small"></span></div>
+            <button data-action="settings">Settings</button>
+            <button data-action="org-admin" class="hidden" id="org-admin-link">Organization admin</button>
+            <button data-action="service-admin" class="hidden" id="service-admin-link">Service admin</button>
+            <button data-action="logout">Sign out</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="sidebar" id="sidebar">
+        <button class="btn primary new-mail" id="new-mail-btn">&#9998; New mail</button>
+        <ul class="folders" id="folder-list"></ul>
+        <ul class="folders smart">
+          <li><button data-smart="flagged">&#9873; Flagged</button></li>
+        </ul>
+        <button class="link-btn" id="new-folder-btn">+ New folder</button>
+        <div class="usage" id="usage"></div>
+      </nav>
+
+      <section class="list-pane">
+        <div class="list-head">
+          <h2 id="list-title">Inbox</h2>
+          <div class="tabs" id="focus-tabs">
+            <button data-focus="focused" class="active">Focused</button>
+            <button data-focus="other">Other</button>
+          </div>
+        </div>
+        <ul class="msg-list" id="msg-list" aria-live="polite"></ul>
+        <button class="link-btn more hidden" id="load-more">Load more</button>
+      </section>
+
+      <section class="read-pane" id="read-pane">
+        <div class="empty-state" id="empty-state">
+          <div class="big-icon">&#9993;</div>
+          <p>Select an item to read</p>
+        </div>
+        <article id="reader" class="hidden"></article>
+        <form id="composer" class="composer hidden" autocomplete="off"></form>
+      </section>
+    </div>
+  </section>
+
+  <!-- Modal host -->
+  <div class="modal-backdrop hidden" id="modal"><div class="modal" role="dialog" aria-modal="true" id="modal-body"></div></div>
+  <div class="toast hidden" id="toast" role="status"></div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
