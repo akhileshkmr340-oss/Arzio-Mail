@@ -205,7 +205,8 @@ export function requireAuth(req, res, next) {
     req.tokenScopes = t.scopes;
     return next();
   }
-  const user = userFromToken(parseCookies(req.headers.cookie)[COOKIE]);
+  // The phone app sends its session in a header instead of a cookie
+  const user = userFromToken(req.headers['x-arzio-session'] || parseCookies(req.headers.cookie)[COOKIE]);
   if (!user) return res.status(401).json({ error: 'Please sign in.' });
   req.user = user;
   next();

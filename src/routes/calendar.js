@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { httpError, createApiToken, createAppPassword } from '../auth.js';
 import * as cal from '../calendar/service.js';
 import * as eas from '../eas/index.js';
+import * as push from '../push.js';
 import * as store from '../mail/store.js';
 import * as ai from '../ai/index.js';
 import { audit } from '../audit.js';
@@ -191,6 +192,17 @@ calendar.get('/me/app-passwords', (req, res) => {
       username: req.user.email,
     },
   });
+});
+
+// ------------------------------------------------------------ push notifications for the phone app
+calendar.post('/me/push-tokens', (req, res) => {
+  if (req.tokenScopes) return res.status(403).json({ error: 'API tokens cannot register phones.' });
+  push.registerToken(req.user.id, { token: req.body?.token, platform: req.body?.platform, deviceName: req.body?.deviceName });
+  res.status(201).json({ ok: true });
+});
+calendar.delete('/me/push-tokens', (req, res) => {
+  push.removeToken(req.user.id, req.body?.token || req.query.token);
+  res.json({ ok: true });
 });
 
 // ------------------------------------------------------------ phones connected with Exchange ActiveSync

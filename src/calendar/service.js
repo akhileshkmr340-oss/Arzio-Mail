@@ -5,6 +5,7 @@ import { db } from '../db.js';
 import { config } from '../config.js';
 import { buildIcs, parseIcs } from './ics.js';
 import { performSend } from '../mail/delivery.js';
+import { pushToUser } from '../push.js';
 
 const httpErr = (status, message) => Object.assign(new Error(message), { status });
 const MAX_OCCURRENCES = 500;
@@ -249,6 +250,7 @@ export function importIcs(user, text) {
 // ------------------------------------------------------------ reminders (events and tasks)
 export function notify(userId, kind, title, body = '', link = {}) {
   db.prepare('INSERT INTO notifications (user_id, kind, title, body, link_json) VALUES (?, ?, ?, ?, ?)').run(userId, kind, title, body, JSON.stringify(link));
+  pushToUser(userId, { title, body, data: { type: kind, ...link }, kind: 'reminders' });
 }
 
 export function processReminders(now = new Date()) {

@@ -22,6 +22,10 @@ The token is shown once. Send it as `Authorization: Bearer arz_...`.
 **Session cookie (the web app).** `POST /api/auth/login` `{ "email", "password", "code"? }`
 sets an HttpOnly cookie.
 
+**App session (the phone app).** The same call with `"client": "app"` returns
+`{ "session", "expires" }` instead of a cookie. Send it as `X-Arzio-Session: <session>`.
+`POST /api/auth/logout` with that header ends it.
+
 **Shared mailboxes.** Add `X-Arzio-Mailbox: <id>` (from `GET /api/me/mailboxes`)
 to act in a shared mailbox you are a member of.
 
@@ -66,6 +70,7 @@ curl -H "Authorization: Bearer $ARZIO_TOKEN" -H "Content-Type: application/json"
 | GET | `/me/identities`, `/me/mailboxes` | addresses you can send from, mailboxes you can open |
 | GET, POST, DELETE | `/me/app-passwords` | app passwords for mail apps |
 | GET | `/me/devices` | phones connected with Exchange ActiveSync |
+| POST, DELETE | `/me/push-tokens` | `{ token, platform, deviceName }`: the phone app's Expo push token |
 | POST | `/me/devices/:id` | `{ "action": "block" \| "allow" \| "wipe" \| "remove" }` |
 | GET, POST, DELETE | `/me/tokens` | API tokens |
 | GET, POST | `/me/import`, `/me/import/imap`, `/me/import/file` | import from another account or an .mbox / .eml file |

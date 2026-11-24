@@ -10,6 +10,7 @@ import { config, isLocalDomain } from '../config.js';
 import { storageLimit, sendLimit } from '../billing.js';
 import * as blobs from '../blobs.js';
 import { db, isJobLeader } from '../db.js';
+import { pushToUser } from '../push.js';
 import { storeMessage, saveAi, mailboxUsage, getMessage, deleteMessage, folderByRole } from './store.js';
 import { resolveRecipient, checkInbound, senderListMatch, applyRules, shouldAutoReply, recordContacts, addressesOf } from './features.js';
 import { triage } from '../ai/index.js';
@@ -96,6 +97,7 @@ export async function deliverRaw(raw, recipients, smtp = {}) {
     db.prepare('UPDATE messages SET spam_score = ?, auth_results = ? WHERE id = ?').run(check.score, check.auth ? JSON.stringify({ ...check.auth, reasons: check.reasons }) : null, id);
     delivered.push(user.email);
     audit(user.id, 'mail.received', { messageId: id, from: from.address, to: user.email, subject: parsed.subject || '', junk });
+    if (!junk) pushToUser(user.id, { title: from.name || from.address || 'New message', body: parsed.subject || '(no subject)', data: { type: 'mail', messageId: id } });
 
     if (!junk) {
       // Meeting invites, replies and cancellations (iMIP)
@@ -341,6 +343,17 @@ export async function performSend(user, input) {
     contentType: a.contentType || 'application/octet-stream',
     content: Buffer.from(String(a.contentBase64 || ''), 'base64'),
   }));
+  // Forwarding: carry the original message's attachments along (forwardOf = message id)
+  if (input.forwardOf) {
+    const orig = getMessage(user.id, input.forwardOf);
+    if (orig) {
+      for (const a of db.prepare('SELECT filename, content_type, storage_path FROM attachments WHERE message_id = ?').all(orig.id)) {
+        if (/^text\/calendar/i.test(a.content_type)) continue;
+        const content = blobs.get(a.storage_path);
+        if (content) attachments.push({ filename: a.filename, contentType: a.content_type, content });
+      }
+    }
+  }
   const fromDomain = domainOf(fromAddr);
   const messageId = `<${crypto.randomUUID()}@${fromDomain}>`;
   let text = String(input.text || '');

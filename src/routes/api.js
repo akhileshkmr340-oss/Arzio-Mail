@@ -55,12 +55,17 @@ api.post('/auth/login', wrap(async (req, res) => {
   rateLimit(`login-acct:${String(email).toLowerCase()}`, 10, 15 * 60e3);
   const s = login(email, password, code);
   audit(s.userId, 'auth.login', { ip: req.ip });
+  if (req.body?.client === 'app') {
+    // The phone app keeps the session itself and sends it as X-Arzio-Session
+    audit(s.userId, 'auth.app_login', { device: String(req.body.device || '').slice(0, 80) });
+    return res.json({ ok: true, session: s.token, expires: s.expires });
+  }
   res.setHeader('Set-Cookie', sessionCookie(s.token, s.expires));
   res.json({ ok: true });
 }));
 
 api.post('/auth/logout', (req, res) => {
-  const token = parseCookies(req.headers.cookie)[COOKIE];
+  const token = req.headers['x-arzio-session'] || parseCookies(req.headers.cookie)[COOKIE];
   if (token) destroySession(token);
   res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
   res.json({ ok: true });

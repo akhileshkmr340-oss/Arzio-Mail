@@ -21,6 +21,7 @@ It has built-in AI (Claude by default): thread summaries with action items, repl
 | AI agents | MCP server at `/mcp` so assistants such as Claude can search and read mail, send, create events and tasks with a personal API token (read-only or read-and-act) |
 | Mail apps | IMAP server and SMTP submission, so Outlook desktop, Apple Mail, Thunderbird and phone mail apps work; app passwords for accounts with two-step verification |
 | Phone sync | Exchange ActiveSync: add an "Exchange" account on iPhone, Android, Outlook for iOS/Android or Samsung Email and get mail, calendar, contacts and tasks with instant push; remote wipe and block from Settings. CalDAV and CardDAV for Mac, Thunderbird and DAVx⁵ |
+| Phone app | Native iPhone and Android app (Expo, in [mobile/](mobile/README.md)): mail with folders, Focused / Other and search, safe HTML viewing, reply and forward with attachments, AI summary and drafts, calendar agenda with invitation replies, To Do, out of office, push notifications for new mail and reminders |
 | Install | Installable web app (PWA) on Windows, Mac, Android and iPhone, with reminders as notifications |
 | Tenants | Public tenant with open signup; private organizations with custom domains and DNS verification |
 | Admin center | Users, shared mailboxes (support@, info@), groups / distribution lists, domains, mail flow rules with data loss prevention (card, Aadhaar, PAN, IBAN, SSN), message trace, audit log, usage reports |
@@ -103,6 +104,7 @@ src/
   dav.js                 CalDAV and CardDAV
   eas/                   Exchange ActiveSync (WBXML, sync, push, provisioning)
   mcp.js                 MCP server for AI agents
+  push.js                push notifications to the phone app
   audit.js, mfa.js, maintenance.js
   routes/api.js          mail, folders, drafts, AI, org and service admin, inbound webhooks
   routes/features.js     rules, templates, contacts, senders, aliases, delegates, preferences
@@ -118,16 +120,17 @@ src/
   calendar/              events, invitations (iMIP), recurrence, iCalendar
   ai/                    AI facade, Claude provider, built-in fallback
 public/                  web app (PWA)
+mobile/                  iPhone and Android app (Expo / React Native)
 scripts/                 create-admin, backup, restore
 deploy/                  docker-compose, nginx, systemd, certificate hook
 docs/                    DEPLOY, OPERATIONS, API, BILLING
-test/                    46 end-to-end tests
+test/                    49 end-to-end tests
 ```
 
 ## Known limits
 
 - Virus scanning of attachments is not built in; add ClamAV at the MX for production.
-- Native iOS and Android apps are not included. Phones use the installable web app, or their built-in mail app over IMAP.
+- The phone app was tested as a web build in a browser at phone size and type-checked; build it with EAS and try it on real phones before publishing to the stores. Push needs an Expo project (`eas init`).
 - Exchange Web Services (EWS) and MAPI are not supported, so Outlook for Windows and Mac connects over IMAP (its calendar then comes from the subscription link or CalDAV). Phones use Exchange ActiveSync. ActiveSync was tested with a scripted phone client that follows the protocol documents, not yet with each phone model; try your phones before rollout.
 - S/MIME and Microsoft Purview-style message encryption are not built in. Mail is protected in transit with TLS (set the TLS certificates) and access is controlled by sign-in and two-step verification.
 - Microsoft 365 work accounts can only be imported if their admin allows IMAP with basic sign-in; otherwise export to .pst/.mbox first.
