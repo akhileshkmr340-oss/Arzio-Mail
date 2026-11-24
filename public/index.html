@@ -64,6 +64,10 @@
         </div>
       </div>
     </header>
+    <div class="ribbon" id="ribbon">
+      <div class="ribbon-tabs" id="ribbon-tabs" role="tablist" aria-label="Ribbon"></div>
+      <div class="ribbon-body" id="ribbon-body" role="toolbar"></div>
+    </div>
 
     <div class="layout">
       <nav class="sidebar" id="sidebar">
@@ -89,6 +93,7 @@
       <section class="list-pane">
         <div class="list-head">
           <h2 id="list-title">Inbox</h2>
+          <span class="filter-chip hidden" id="filter-chip"></span>
           <div class="tabs" id="focus-tabs">
             <button data-focus="focused" class="active">Focused</button>
             <button data-focus="other">Other</button>

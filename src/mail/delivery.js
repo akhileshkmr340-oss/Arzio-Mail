@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import nodemailer from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
+import { isIgnored, messageEml } from '../routes/ribbon.js';
 import { simpleParser } from 'mailparser';
 import { config, isLocalDomain } from '../config.js';
 import { storageLimit, sendLimit } from '../billing.js';
@@ -96,6 +97,10 @@ export async function deliverRaw(raw, recipients, smtp = {}) {
       attachments: (parsed.attachments || []).filter((a) => !(/^text\/calendar/i.test(a.contentType || '') && !a.filename)).map((a) => ({ filename: a.filename, contentType: a.contentType, content: a.content, contentId: a.contentId })),
     });
     db.prepare('UPDATE messages SET spam_score = ?, auth_results = ? WHERE id = ?').run(check.score, check.auth ? JSON.stringify({ ...check.auth, reasons: check.reasons }) : null, id);
+    // Ignored conversations: later replies go straight to Deleted Items
+    const threadId = db.prepare('SELECT thread_id FROM messages WHERE id = ?').get(id)?.thread_id;
+    const ignored = !junk && threadId && isIgnored(user.id, threadId);
+    if (ignored) db.prepare('UPDATE messages SET folder_id = ? WHERE id = ?').run(folderByRole(user.id, 'trash').id, id);
     // Outlook extras: importance, read-receipt request, @mentions of this user
     const prio = String(parsed.headers.get('priority') || parsed.headers.get('importance') || '').toLowerCase();
     const importance = prio === 'high' || prio === 'low' ? prio : null;
@@ -107,7 +112,7 @@ export async function deliverRaw(raw, recipients, smtp = {}) {
     }
     delivered.push(user.email);
     audit(user.id, 'mail.received', { messageId: id, from: from.address, to: user.email, subject: parsed.subject || '', junk });
-    if (!junk) pushToUser(user.id, { title: from.name || from.address || 'New message', body: parsed.subject || '(no subject)', data: { type: 'mail', messageId: id } });
+    if (!junk && !ignored) pushToUser(user.id, { title: from.name || from.address || 'New message', body: parsed.subject || '(no subject)', data: { type: 'mail', messageId: id } });
 
     if (!junk) {
       // Meeting invites, replies and cancellations (iMIP)
@@ -363,6 +368,11 @@ export async function performSend(user, input) {
         if (content) attachments.push({ filename: a.filename, contentType: a.content_type, content });
       }
     }
+  }
+  // Forward as attachment: the original goes along as an .eml file
+  for (const mid of (Array.isArray(input.attachMessages) ? input.attachMessages : []).slice(0, 10)) {
+    const eml = await messageEml(user.id, mid);
+    if (eml) attachments.push({ filename: `${(eml.message.subject || 'message').replace(/[\\/:*?"<>|\r\n]+/g, ' ').trim().slice(0, 80) || 'message'}.eml`, contentType: 'message/rfc822', contentDisposition: 'attachment', content: eml.raw });
   }
   const fromDomain = domainOf(fromAddr);
   const messageId = `<${crypto.randomUUID()}@${fromDomain}>`;

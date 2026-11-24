@@ -96,6 +96,7 @@ async function startApp() {
   const { user, usage } = await api('/me');
   state.me = user;
   applyUi();
+  loadQuickSteps().then(renderRibbon);
   $('#auth-view').classList.add('hidden');
   $('#app-view').classList.remove('hidden');
   $('#avatar-btn').textContent = initials(user.name, user.email);
@@ -238,12 +239,17 @@ async function loadList(append = false) {
   else if (state.smart === 'mentions') params.set('mentions', '1');
   else params.set('folder', state.folderId);
   if (isInbox) params.set('focus', state.focus);
+  if (RB.filter && state.smart !== 'scheduled') params.set('filter', RB.filter);
+  if (ui().sort && ui().sort !== 'date') params.set('sort', ui().sort);
   if (!append) state.offset = 0;
   params.set('offset', state.offset);
   params.set('limit', 50);
   const { messages } = await api(`/messages?${params}`);
   state.messages = append ? [...state.messages, ...messages] : messages;
   $('#load-more').classList.toggle('hidden', messages.length < 50);
+  const fl = FILTERS.find(([v]) => v === RB.filter);
+  $('#filter-chip').classList.toggle('hidden', !fl);
+  if (fl) $('#filter-chip').innerHTML = `Filter: ${esc(fl[1])} <button class="link-btn" data-clear-filter aria-label="Clear filter">\u00D7</button>`;
   renderList();
 }
 
@@ -251,18 +257,26 @@ function renderList() {
   const f = currentFolder();
   const showTo = f && ['sent', 'drafts'].includes(f.role) && !state.q;
   if (!state.messages.length) {
-    $('#msg-list').innerHTML = `<li class="list-empty">${state.q ? 'No results.' : 'Nothing here yet.'}</li>`;
+    $('#msg-list').innerHTML = `<li class="list-empty">${state.q ? 'No results.' : RB.filter ? 'Nothing matches this filter.' : 'Nothing here yet.'}</li>`;
+    ribbonSync();
     return;
   }
   $('#msg-list').innerHTML = state.messages.map((m) => `
-    <li class="msg ${m.is_read ? '' : 'unread'} ${m.id === state.selectedId ? 'selected' : ''}" data-id="${m.id}" draggable="true" tabindex="0">
+    <li class="msg ${m.is_read ? '' : 'unread'} ${m.id === state.selectedId || state.multi.has(m.id) ? 'selected' : ''}" data-id="${m.id}" draggable="true" tabindex="0">
       <span class="lavatar" aria-hidden="true">${esc(initials(showTo ? m.to?.[0]?.name : m.from_name, showTo ? m.to?.[0]?.address : m.from_addr))}</span>
       <span class="who">${esc(showTo ? `To: ${people(m.to)}` : m.from_name || m.from_addr || '(unknown sender)')}</span>
-      <span class="icons">${m.mentions_me ? '<span class="at" title="You were mentioned">@</span>' : ''}${m.importance === 'high' ? '<span class="imp" title="High importance">!</span>' : m.importance === 'low' ? '<span title="Low importance">↓</span>' : ''}${m.is_pinned ? '\u{1F4CC}' : ''}${m.has_attachments ? '\u{1F4CE}' : ''}${m.is_flagged ? '<span class="flag">⚑</span>' : ''}</span>
+      <span class="icons">${m.mentions_me ? '<span class="at" title="You were mentioned">@</span>' : ''}${m.importance === 'high' ? '<span class="imp" title="High importance">!</span>' : m.importance === 'low' ? '<span title="Low importance">↓</span>' : ''}${m.is_pinned ? '\u{1F4CC}' : ''}${m.has_attachments ? '\u{1F4CE}' : ''}${m.is_flagged ? '<span class="flag">⚑</span>' : m.flag_completed_at ? '<span class="done" title="Follow-up complete">✔</span>' : ''}</span>
       <span class="subj">${esc(m.subject || '(no subject)')}</span>
       <span class="when">${fmtDate(m.date)}</span>
-      <span class="snip">${m.snooze_until ? `<span class="tag">\u23F0 ${fmtDate(m.snooze_until)}</span>` : ''}${m.ai_priority === 'high' ? '<span class="tag high">High priority</span>' : ''}${m.ai_needs_reply && f?.role !== 'sent' ? '<span class="tag reply">Needs reply</span>' : ''}${(m.categories || []).map((c) => `<span class="tag cat">${esc(c)}</span>`).join('')}${esc(m.snippet)}</span>
+      <span class="snip">${m.is_flagged && m.flag_due_at ? dueTag(m.flag_due_at) : ''}${m.snooze_until ? `<span class="tag">\u23F0 ${fmtDate(m.snooze_until)}</span>` : ''}${m.ai_priority === 'high' ? '<span class="tag high">High priority</span>' : ''}${m.ai_needs_reply && f?.role !== 'sent' ? '<span class="tag reply">Needs reply</span>' : ''}${(m.categories || []).map((c) => `<span class="tag cat">${esc(c)}</span>`).join('')}${esc(m.snippet)}</span>
     </li>`).join('');
+  ribbonSync();
+}
+function dueTag(iso) {
+  const d = new Date(iso); const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((new Date(d).setHours(0, 0, 0, 0) - today) / 86400e3);
+  const label = days < 0 ? 'Overdue' : days === 0 ? 'Due today' : days === 1 ? 'Due tomorrow' : `Due ${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}`;
+  return `<span class="tag due${days < 0 ? ' high' : ''}">\u{1F6A9} ${label}</span>`;
 }
 
 $('#msg-list').addEventListener('click', async (e) => {
@@ -312,6 +326,10 @@ function closeReader() {
   $('#composer').classList.add('hidden');
   $('#empty-state').classList.remove('hidden');
   $('#app-view').classList.remove('reading');
+  if (!state.multi?.size) $('#empty-state p').textContent = 'Select an item to read';
+  if (speech.on) stopReading();
+  if (state.current && state.current.message.id !== state.selectedId) state.current = null;
+  ribbonSync();
 }
 
 function showPane(which) {
@@ -323,6 +341,7 @@ function showPane(which) {
 }
 
 async function openMessage(id) {
+  state.multi.clear();
   const listed = state.messages.find((m) => m.id === id);
   const f = currentFolder();
   if (listed && f?.role === 'drafts' && !state.q) return openDraft(id);
@@ -345,27 +364,28 @@ function renderReader(message, thread) {
       <button class="btn" data-act="replyall">↩↩ Reply all</button>
       <button class="btn" data-act="forward">↪ Forward</button>
       <span class="sep"></span>
-      <button class="btn" data-act="archive">Archive</button>
-      <button class="btn danger" data-act="delete">Delete</button>
-      <button class="btn" data-act="junk">Junk</button>
-      <select class="btn" data-act="move" aria-label="Move to folder"><option value="">Move to…</option>${folderOpts}</select>
+      <button class="btn dup" data-act="archive">Archive</button>
+      <button class="btn danger dup" data-act="delete">Delete</button>
+      <button class="btn dup" data-act="junk">Junk</button>
+      <select class="btn dup" data-act="move" aria-label="Move to folder"><option value="">Move to…</option>${folderOpts}</select>
       <span class="sep"></span>
-      <button class="btn" data-act="flag">${message.is_flagged ? 'Unflag' : '⚑ Flag'}</button>
+      <button class="btn dup" data-act="flag">${message.is_flagged ? 'Unflag' : '⚑ Flag'}</button>
       <button class="btn" data-act="pin">${message.is_pinned ? 'Unpin' : '\u{1F4CC} Pin'}</button>
-      <button class="btn" data-act="unread">Mark unread</button>
-      <button class="btn" data-act="category">Categorize</button>
+      <button class="btn dup" data-act="unread">Mark unread</button>
+      <button class="btn dup" data-act="category">Categorize</button>
       <button class="btn" data-act="snooze">\u23F0 Snooze</button>
       <button class="btn" data-act="more">\u22EF More</button>
       <span class="sep"></span>
       <button class="btn ai" data-act="summarize">✨ Summarize</button>
       <button class="btn ai" data-act="aireply">✨ Draft reply</button>
-      <button class="btn" data-act="translate" title="Translate this message">文A Translate</button>
+      <button class="btn dup" data-act="translate" title="Translate this message">文A Translate</button>
       <button class="btn" data-act="immersive" title="Immersive Reader">\u{1F4D6} Immersive Reader</button>
       <button class="btn" data-act="print" title="Print">\u{1F5A8} Print</button>
     </div>
     ${message.receipt_to ? `<div class="info-bar" id="receipt-bar">${esc(message.from_name || message.from_addr)} asked to be notified when you read this message. <button class="btn small" data-act="receipt-send">Send receipt</button> <button class="link-btn" data-act="receipt-skip">Don't send</button></div>` : ''}
     <h1 class="thread-subject">${esc(message.subject || '(no subject)')}</h1>
     <div class="thread-meta">
+      ${message.is_flagged ? (message.flag_due_at ? dueTag(message.flag_due_at) : '<span class="tag due">\u{1F6A9} Flagged</span>') : message.flag_completed_at ? '<span class="tag">✔ Follow-up complete</span>' : ''}
       ${message.importance === 'high' ? '<span class="tag high">! High importance</span>' : message.importance === 'low' ? '<span class="tag">↓ Low importance</span>' : ''}
       ${message.ai_priority === 'high' ? '<span class="tag high">High priority</span>' : ''}
       ${message.ai_category ? `<span class="tag">${esc(message.ai_category)}</span>` : ''}
@@ -377,6 +397,7 @@ function renderReader(message, thread) {
     ${thread.map((m) => mailItem(m, m.id === message.id || thread.length === 1 || m === thread[thread.length - 1])).join('')}`;
   showPane('reader');
   state.current = { message, thread };
+  ribbonSync();
   loadReactions(thread);
   $$('.mail-item', r).forEach((el) => {
     $('.mail-head', el).addEventListener('click', () => el.classList.toggle('collapsed'));
@@ -913,7 +934,7 @@ function setBodyText(text) {
 function composePayload(c, extra = {}) {
   const html = `<div class="arzio-body">${c.html}</div>${c.quoteHtml ? `<br>${c.quoteHtml}` : ''}`;
   return { from: c.from || undefined, to: c.to, cc: c.cc, bcc: c.bcc, subject: c.subject, text: c.text, html, noSignature: true, attachments: c.attachments, inReplyTo: c.inReplyTo, references: c.references, draftId: c.draftId,
-    importance: c.importance !== 'normal' ? c.importance : undefined, readReceipt: c.readReceipt || undefined, forwardOf: c.forwardOf || undefined, ...extra };
+    importance: c.importance !== 'normal' ? c.importance : undefined, readReceipt: c.readReceipt || undefined, forwardOf: c.forwardOf || undefined, attachMessages: c.attachMessages?.length ? c.attachMessages : undefined, ...extra };
 }
 
 async function submitCompose(c, extra = {}) {
@@ -1036,7 +1057,9 @@ function popMenu(anchor, items, opts = {}) {
 
 function renderAttachments() {
   const c = state.composer;
-  $('#att-list').innerHTML = c.attachments.map((a, i) => `<span>\u{1F4CE} ${esc(a.filename)} (${fmtBytes(a.size || 0)}) <button type="button" data-rm="${i}" aria-label="Remove">×</button></span>`).join('');
+  $('#att-list').innerHTML = c.attachments.map((a, i) => `<span>\u{1F4CE} ${esc(a.filename)} (${fmtBytes(a.size || 0)}) <button type="button" data-rm="${i}" aria-label="Remove">×</button></span>`).join('')
+    + (c.attachMessages || []).map((id, i) => `<span>\u2709 ${esc(state.messages.find((x) => x.id === id)?.subject || 'Message')}.eml <button type="button" data-rm-msg="${i}" aria-label="Remove">×</button></span>`).join('');
+  $$('[data-rm-msg]').forEach((b) => b.addEventListener('click', () => { c.attachMessages.splice(Number(b.dataset.rmMsg), 1); renderAttachments(); }));
   $$('[data-rm]').forEach((b) => b.addEventListener('click', () => { c.attachments.splice(Number(b.dataset.rm), 1); renderAttachments(); }));
 }
 
@@ -1483,6 +1506,7 @@ function showMailView() {
   $('.layout').classList.remove('full');
   $('#full-pane').classList.add('hidden');
   $$('[data-view]').forEach((b) => b.classList.remove('active'));
+  ribbonSync();
 }
 async function showView(name, opts = {}) {
   state.view = name;
@@ -1491,6 +1515,7 @@ async function showView(name, opts = {}) {
   $$('[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   $$('#folder-list button, [data-smart]').forEach((b) => b.classList.remove('active'));
   $('#sidebar').classList.remove('open');
+  ribbonSync();
   try { await VIEWS[name]($('#full-pane'), opts); } catch (ex) { toast(ex.message); }
 }
 $$('[data-view]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
@@ -1677,6 +1702,7 @@ function applyUi() {
   root.dataset.textsize = u.textSize || 'medium';
   root.classList.toggle('no-avatars', u.senderImages === false);
   root.classList.toggle('no-preview', u.previewText === false);
+  root.classList.toggle('no-folder-pane', u.folderPane === false);
   const accent = ACCENTS[u.accent] || ACCENTS.blue;
   root.style.setProperty('--brand', accent);
   root.style.setProperty('--brand-dark', `color-mix(in srgb, ${accent} 82%, black)`);
@@ -2599,3 +2625,851 @@ VIEWS.admin = async (pane, opts = {}) => {
 
 
 boot();
+
+// ------------------------------------------------------------ the ribbon (File, Home, Send / Receive, Folder, View, Help)
+// Line icons drawn on a 24px grid, in the spirit of Outlook's ribbon.
+const ICONS = {
+  mailNew: '<rect x="2.5" y="5" width="15" height="11" rx="1.5"/><path d="M3 6l7 5 7-5"/><path d="M19 13v8M15 17h8" class="ac"/>',
+  items: '<rect x="3" y="6" width="13" height="10" rx="1.5"/><path d="M3.5 7l6 4.5 6-4.5"/><rect x="9" y="11" width="12" height="10" rx="1.5" class="fill"/><path d="M9 14h12M12 9.5v3M18 9.5v3"/>',
+  ignore: '<rect x="3" y="4" width="13" height="9" rx="1.5"/><path d="M3.5 5l6 4.5 6-4.5"/><circle cx="17" cy="17" r="4.5" class="rd"/><path d="M13.8 20.2l6.4-6.4" class="rd"/>',
+  cleanup: '<rect x="3" y="4" width="13" height="9" rx="1.5"/><path d="M3.5 5l6 4.5 6-4.5"/><path d="M14 21l4-7M17 14l3 1.5M12 21h8" class="rd"/>',
+  junk: '<rect x="3" y="4" width="13" height="9" rx="1.5"/><path d="M3.5 5l6 4.5 6-4.5"/><circle cx="17" cy="17" r="4.5" class="rd"/><path d="M17 14.5v3M17 19.5v.1" class="rd"/>',
+  trash: '<path d="M4 6h16M9 6V4h6v2M6 6l1 15h10l1-15M10 10v8M14 10v8"/>',
+  archive: '<rect x="3" y="4" width="18" height="5" rx="1" class="ac"/><path d="M5 9v11h14V9M10 13h4"/>',
+  reply: '<rect x="3" y="7" width="15" height="11" rx="1.5"/><path d="M3.5 8l7 5 7-5"/><path d="M14 4H8a3 3 0 0 0-3 3v1M8 2L5 4.5 8 7" class="pu" transform="translate(0 -0.5)"/>',
+  replyAll: '<rect x="5" y="8" width="15" height="11" rx="1.5"/><path d="M5.5 9l7 5 7-5"/><path d="M8 2L5 4.5 8 7M11 2L8 4.5 11 7M8 4.5h8" class="pu"/>',
+  forward: '<rect x="3" y="7" width="15" height="11" rx="1.5"/><path d="M3.5 8l7 5 7-5"/><path d="M13 4.5h9M19 1.5l3 3-3 3" class="ac"/>',
+  meeting: '<rect x="3" y="5" width="18" height="15" rx="1.5"/><path d="M3 9h18M8 3v4M16 3v4"/><path d="M8 13h3M8 16h6" class="ac"/>',
+  attachFwd: '<path d="M8 12V6a3 3 0 0 1 6 0v9a5 5 0 0 1-10 0V8"/><path d="M14 19h8M19 16l3 3-3 3" class="ac"/>',
+  more: '<circle cx="5" cy="12" r="1.3" class="fill"/><circle cx="12" cy="12" r="1.3" class="fill"/><circle cx="19" cy="12" r="1.3" class="fill"/>',
+  move: '<rect x="3" y="6" width="13" height="12" rx="1.5"/><path d="M3.5 7l6 4.5 6-4.5"/><path d="M14 15h8M19 12l3 3-3 3" class="ac"/>',
+  rules: '<rect x="3" y="4" width="13" height="10" rx="1.5"/><path d="M3.5 5l6 4.5 6-4.5"/><path d="M12 18h9M12 21h6M18 15.5l3 2.5-3 2.5" class="ac"/>',
+  save: '<path d="M5 3h11l4 4v14H5z"/><path d="M8 3v6h8V3M8 21v-7h9v7" class="ac"/>',
+  unread: '<rect x="3" y="6" width="18" height="13" rx="1.5"/><path d="M3.5 7l8.5 6 8.5-6"/><circle cx="19.5" cy="5.5" r="2.5" class="acf"/>',
+  read: '<path d="M3 10l9-6 9 6v10H3z"/><path d="M3.5 10.5l8.5 5.5 8.5-5.5"/>',
+  tag: '<rect x="3" y="3" width="8" height="8" rx="1" class="cb"/><rect x="13" y="3" width="8" height="8" rx="1" class="cg"/><rect x="3" y="13" width="8" height="8" rx="1" class="co"/><rect x="13" y="13" width="8" height="8" rx="1" class="cp"/>',
+  flag: '<path d="M6 21V4M6 4h11l-2.5 4.5L17 13H6" class="rd"/>',
+  groupAdd: '<circle cx="8" cy="8" r="3"/><circle cx="16" cy="8" r="3"/><path d="M2.5 19a5.5 5.5 0 0 1 11 0M10.5 14.5a5.5 5.5 0 0 1 9 2"/><path d="M19 16v6M16 19h6" class="ac"/>',
+  groups: '<circle cx="8" cy="8" r="3"/><circle cx="16" cy="8" r="3"/><path d="M2.5 19a5.5 5.5 0 0 1 11 0M10.5 19a5.5 5.5 0 0 1 11 0"/>',
+  person: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  book: '<rect x="5" y="3" width="15" height="18" rx="1.5"/><circle cx="12.5" cy="10" r="2.5"/><path d="M8.5 17a4 4 0 0 1 8 0M3 7h3M3 12h3M3 17h3"/>',
+  filter: '<path d="M3 4h18l-7 8.5V20l-4-2v-5.5z"/>',
+  speaker: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" class="ac"/>',
+  translate: '<path d="M3 5h10M8 3v2M5 5c1 4 4 7 7 8M11 5c-1 4-4 7-7 8" class="ac"/><path d="M12 21l4.5-10L21 21M13.5 18h6"/>',
+  sparkle: '<path d="M12 3l2 5.5L19.5 11 14 13l-2 6-2-6-5.5-2L10 8.5z" class="ac"/><path d="M19 3v3M17.5 4.5h3"/>',
+  insights: '<path d="M12 21s-8-4.5-8-11a5 5 0 0 1 8-4 5 5 0 0 1 8 4c0 6.5-8 11-8 11z" class="pu"/><path d="M8 12h2l1.5-3 2 5 1.5-2H16"/>',
+  bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7z" class="ac"/>',
+  check: '<path d="M4 12.5l5 5L20 6.5" class="gr"/>',
+  folderAdd: '<path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M12 10v6M9 13h6" class="ac"/>',
+  folder: '<path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/>',
+  rename: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4" class="ac"/>',
+  folderDel: '<path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9.5 10.5l5 5M14.5 10.5l-5 5" class="rd"/>',
+  markRead: '<path d="M3 10l9-6 9 6v10H3z"/><path d="M8 14l3 3 5-6" class="gr"/>',
+  sync: '<path d="M20 11a8 8 0 0 0-14.5-4M4 4v4h4M4 13a8 8 0 0 0 14.5 4M20 20v-4h-4" class="ac"/>',
+  outbox: '<path d="M3 13h5l1.5 3h5L16 13h5v7H3z"/><path d="M12 3v9M8.5 6.5L12 3l3.5 3.5" class="ac"/>',
+  layout: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/>',
+  conversations: '<path d="M3 5h13v9H8l-4 3v-3H3z"/><path d="M18 9h3v9h-1v3l-3.5-3H10v-2" class="ac"/>',
+  sort: '<path d="M7 4v16M3.5 16.5L7 20l3.5-3.5M14 6h7M14 11h5M14 16h3"/>',
+  pane: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M12 4v16"/><path d="M14.5 8h4M14.5 11h4M14.5 14h3" class="ac"/>',
+  sidebar: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16"/><path d="M5 8h2M5 11h2M5 14h2" class="ac"/>',
+  preview: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M6 8h8M6 11h12M6 14h10M6 17h7"/>',
+  moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/>',
+  textsize: '<path d="M3 19l5-13 5 13M4.8 14.5h6.4M14 19l3.5-8.5L21 19M15 16.5h5" />',
+  bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
+  reset: '<path d="M4 12a8 8 0 1 0 2.5-5.8M4 4v5h5"/>',
+  keyboard: '<rect x="2" y="6" width="20" height="12" rx="1.5"/><path d="M6 10h.1M10 10h.1M14 10h.1M18 10h.1M7 14h10"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5v.7M12 17h.1"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.1"/>',
+  print: '<path d="M7 9V3h10v6M7 17H4v-7h16v7h-3"/><rect x="7" y="14" width="10" height="7"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+  mail: '<rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M3.5 6l8.5 6 8.5-6"/>',
+  star: '<path d="M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8 6.6 19.7l1.1-6.1L3.2 9.4l6.1-.8z"/>',
+  whatsnew: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4" class="ac"/>',
+};
+const icon = (name) => `<svg class="ri" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ICONS.bolt}</svg>`;
+
+// ribbon state: tab, filter, multi-selection
+const RB = { tab: 'home', filter: null, quickSteps: null };
+state.multi = new Set();
+
+const FILTERS = [['', 'All'], ['unread', 'Unread'], ['attachments', 'Has Files'], ['tome', 'To Me'], ['flagged', 'Flagged'], ['mentions', 'Mentions Me'], ['important', 'High Importance'], ['categorized', 'Categorized'], ['week', 'This Week']];
+const SORTS_UI = [['date', 'Date (newest on top)'], ['date-asc', 'Date (oldest on top)'], ['from', 'From'], ['subject', 'Subject'], ['size', 'Size'], ['importance', 'Importance'], ['flag', 'Flag Status']];
+const CATEGORY_PRESETS = [['Blue category', '\u{1F535}'], ['Green category', '\u{1F7E2}'], ['Orange category', '\u{1F7E0}'], ['Purple category', '\u{1F7E3}'], ['Red category', '\u{1F534}'], ['Yellow category', '\u{1F7E1}']];
+
+// Ribbon layout: tab -> groups -> items. A plain item is a large button,
+// { stack: [...] } is a column of small buttons, { gallery } is the Quick Steps box.
+// needs: 'one' = an open message, 'any' = at least one selected message.
+const RIBBON = {
+  home: [
+    { label: 'New', items: [
+      { id: 'newmail', icon: 'mailNew', label: 'New Email' },
+      { id: 'newitems', icon: 'items', label: 'New Items', menu: true },
+    ] },
+    { label: 'Delete', compact: true, items: [
+      { stack: [
+        { id: 'ignore', icon: 'ignore', label: 'Ignore', needs: 'one' },
+        { id: 'cleanup', icon: 'cleanup', label: 'Clean Up', menu: true },
+        { id: 'junk', icon: 'junk', label: 'Junk', menu: true, needs: 'any' },
+      ] },
+      { id: 'delete', icon: 'trash', label: 'Delete', needs: 'any' },
+      { id: 'archive', icon: 'archive', label: 'Archive', needs: 'any' },
+    ] },
+    { label: 'Respond', compact: true, items: [
+      { id: 'reply', icon: 'reply', label: 'Reply', needs: 'one' },
+      { id: 'replyall', icon: 'replyAll', label: 'Reply All', needs: 'one' },
+      { id: 'forward', icon: 'forward', label: 'Forward', needs: 'one' },
+      { stack: [
+        { id: 'meeting', icon: 'meeting', label: 'Meeting', needs: 'one', title: 'Reply with a meeting invitation' },
+        { id: 'fwdattach', icon: 'attachFwd', label: 'As Attachment', needs: 'any', title: 'Forward as an attachment' },
+        { id: 'respondmore', icon: 'more', label: 'More', menu: true, needs: 'one' },
+      ] },
+    ] },
+    { label: 'Quick Steps', collapse: 4, launcher: 'managesteps', items: [{ gallery: true }] },
+    { label: 'Move', collapse: 6, items: [{ stack: [
+      { id: 'move', icon: 'move', label: 'Move', menu: true, needs: 'any' },
+      { id: 'rules', icon: 'rules', label: 'Rules', menu: true },
+      { id: 'savefile', icon: 'save', label: 'Save as File', needs: 'one', title: 'Save this message as an .eml file' },
+    ] }] },
+    { label: 'Tags', collapse: 5, items: [
+      { id: 'unreadread', icon: 'unread', label: 'Unread/ Read', needs: 'any' },
+      { stack: [
+        { id: 'categorize', icon: 'tag', label: 'Categorize', menu: true, needs: 'any' },
+        { id: 'followup', icon: 'flag', label: 'Follow Up', menu: true, needs: 'any' },
+      ] },
+    ] },
+    { label: 'Groups', collapse: 8, items: [{ stack: [
+      { id: 'newgroup', icon: 'groupAdd', label: 'New Group' },
+      { id: 'browsegroups', icon: 'groups', label: 'Browse Groups' },
+    ] }] },
+    { label: 'Find', collapse: 7, items: [{ stack: [
+      { search: true },
+      { id: 'addressbook', icon: 'book', label: 'Address Book' },
+      { id: 'filter', icon: 'filter', label: 'Filter Email', menu: true },
+    ] }] },
+    { label: 'Speech', items: [{ id: 'readaloud', icon: 'speaker', label: 'Read Aloud', needs: 'one' }] },
+    { label: 'Language', items: [{ id: 'translate', icon: 'translate', label: 'Translate', menu: true, needs: 'one' }] },
+    { label: 'Arzio AI', collapse: 9, items: [{ stack: [
+      { id: 'summarize', icon: 'sparkle', label: 'Summarize', needs: 'one' },
+      { id: 'aidraft', icon: 'reply', label: 'Draft Reply', needs: 'one' },
+      { id: 'ask', icon: 'sparkle', label: 'Ask Arzio' },
+    ] }] },
+    { label: 'Insights', items: [{ id: 'insights', icon: 'insights', label: 'Insights' }] },
+  ],
+  send: [
+    { label: 'Send & Receive', items: [
+      { id: 'sendreceive', icon: 'sync', label: 'Send/Receive All Folders' },
+      { stack: [
+        { id: 'updatefolder', icon: 'folder', label: 'Update Folder' },
+        { id: 'outbox', icon: 'outbox', label: 'Outbox (scheduled)' },
+      ] },
+    ] },
+    { label: 'Preferences', items: [
+      { id: 'ooo', icon: 'mail', label: 'Automatic Replies' },
+      { id: 'undosend', icon: 'reset', label: 'Undo Send', title: 'Choose how long you can undo a sent message' },
+    ] },
+  ],
+  folder: [
+    { label: 'New', items: [{ id: 'newfolder', icon: 'folderAdd', label: 'New Folder' }] },
+    { label: 'Actions', items: [{ stack: [
+      { id: 'renamefolder', icon: 'rename', label: 'Rename Folder', needsFolder: 'custom' },
+      { id: 'deletefolder', icon: 'folderDel', label: 'Delete Folder', needsFolder: 'custom' },
+    ] }] },
+    { label: 'Clean Up', items: [
+      { id: 'markallread', icon: 'markRead', label: 'Mark All as Read', needsFolder: 'any' },
+      { stack: [
+        { id: 'cleanupfolder', icon: 'cleanup', label: 'Clean Up Folder', needsFolder: 'any' },
+        { id: 'emptyfolder', icon: 'trash', label: 'Delete All', needsFolder: 'any' },
+      ] },
+    ] },
+    { label: 'Favorites', items: [{ id: 'favorite', icon: 'star', label: 'Show in Favorites', needsFolder: 'any' }] },
+    { label: 'Properties', items: [{ id: 'folderprops', icon: 'info', label: 'Folder Properties', needsFolder: 'any' }] },
+  ],
+  view: [
+    { label: 'Current View', items: [
+      { id: 'changeview', icon: 'layout', label: 'Change View', menu: true },
+      { id: 'resetview', icon: 'reset', label: 'Reset View' },
+    ] },
+    { label: 'Messages', items: [
+      { id: 'conversations', icon: 'conversations', label: 'Show as Conversations', toggle: () => ui().conversations !== false },
+      { stack: [
+        { id: 'sortby', icon: 'sort', label: 'Arrange By', menu: true },
+        { id: 'preview', icon: 'preview', label: 'Message Preview', menu: true },
+      ] },
+    ] },
+    { label: 'Layout', items: [
+      { id: 'folderpane', icon: 'sidebar', label: 'Folder Pane', toggle: () => ui().folderPane !== false },
+      { id: 'readingpane', icon: 'pane', label: 'Reading Pane', menu: true },
+      { stack: [
+        { id: 'ribbonmode', icon: 'layout', label: 'Ribbon Layout', menu: true },
+        { id: 'textsize', icon: 'textsize', label: 'Text Size', menu: true },
+      ] },
+    ] },
+    { label: 'Appearance', items: [
+      { id: 'darkmode', icon: 'moon', label: 'Dark Mode', toggle: () => document.documentElement.dataset.theme === 'dark' },
+      { id: 'appearance', icon: 'gear', label: 'Appearance Settings' },
+    ] },
+    { label: 'Window', items: [{ id: 'reminders', icon: 'bell', label: 'Reminders Window' }] },
+  ],
+  help: [
+    { label: 'Help', items: [
+      { id: 'shortcuts', icon: 'keyboard', label: 'Keyboard Shortcuts' },
+      { id: 'whatsnew', icon: 'whatsnew', label: "What's New" },
+      { id: 'about', icon: 'help', label: 'About Arzio Mail' },
+    ] },
+    { label: 'Options', items: [{ id: 'options', icon: 'gear', label: 'Settings' }] },
+  ],
+};
+const RIBBON_TABS = [['file', 'File'], ['home', 'Home'], ['send', 'Send / Receive'], ['folder', 'Folder'], ['view', 'View'], ['help', 'Help']];
+
+function rbButton(it, size) {
+  const on = it.toggle ? it.toggle() : false;
+  return `<button type="button" class="rb ${size}${on ? ' on' : ''}" data-rb="${it.id}" title="${esc(it.title || it.label.replace('/ ', '/'))}"${it.needs ? ` data-needs="${it.needs}"` : ''}${it.needsFolder ? ` data-folder-needs="${it.needsFolder}"` : ''}${it.toggle ? ` aria-pressed="${on}"` : ''}>${icon(it.icon)}<span class="rl">${esc(it.label)}${it.menu ? '<i class="caret"></i>' : ''}</span></button>`;
+}
+function quickStepsGallery() {
+  const steps = RB.quickSteps || [];
+  return `<div class="qs-gallery"><div class="qs-items">${steps.slice(0, 3).map((s, i) => `<button type="button" class="qs" data-qs="${i}" title="${esc(s.name)}">${icon(s.icon === 'forward' ? 'forward' : s.icon === 'mail' ? 'mail' : s.icon === 'check' ? 'check' : s.icon === 'reply' ? 'reply' : s.icon === 'move' ? 'move' : 'bolt')}<span>${esc(s.name)}</span></button>`).join('')}</div>
+    <button type="button" class="qs-more" data-rb="quicksteps" title="All Quick Steps">▾</button></div>`;
+}
+function renderRibbon() {
+  const box = $('#ribbon');
+  if (!box || !state.me) return;
+  const mode = ui().ribbon || 'classic';
+  box.classList.toggle('simplified', mode === 'simplified');
+  $('#ribbon-tabs').innerHTML = RIBBON_TABS.map(([k, l]) => `<button type="button" role="tab" class="rtab${RB.tab === k ? ' active' : ''}${k === 'file' ? ' file' : ''}" data-rtab="${k}" aria-selected="${RB.tab === k}">${l}</button>`).join('')
+    + `<button type="button" class="rb-collapse" data-rb="ribbonflip" title="${mode === 'simplified' ? 'Classic ribbon' : 'Simplified ribbon'}">${mode === 'simplified' ? '⌄' : '⌃'}</button>`;
+  const groups = RIBBON[RB.tab] || RIBBON.home;
+  const body = $('#ribbon-body');
+  const draw = (collapsed) => { body.innerHTML = groups.map((g, gi) => (collapsed.has(gi) ? collapsedGroup(g, gi) : `<div class="rgroup${g.compact ? ' compact' : ''}"><div class="rg-items">${g.items.map((it) => {
+    if (it.gallery) return quickStepsGallery();
+    if (it.stack) return `<div class="rstack">${it.stack.map((s) => (s.search ? '<input class="rb-search" id="rb-people" type="search" placeholder="Search People" aria-label="Search People">' : rbButton(s, 'small'))).join('')}</div>`;
+    return rbButton(it, 'big');
+  }).join('')}</div><div class="rg-label">${esc(g.label)}${g.launcher ? `<button type="button" class="launcher" data-rb="${g.launcher}" title="Manage ${esc(g.label)}">↘</button>` : ''}</div></div>`)).join(''); };
+  // Like Outlook, groups fold into a single drop-down button when the window is too narrow
+  const order = groups.map((g, i) => [g.collapse || 0, i]).filter(([c]) => c).sort((a, b) => b[0] - a[0]).map(([, i]) => i);
+  const collapsed = new Set();
+  draw(collapsed);
+  while (body.scrollWidth > body.clientWidth + 1 && order.length) { collapsed.add(order.shift()); draw(collapsed); }
+  ribbonSync();
+}
+const groupItems = (g) => g.items.flatMap((it) => (it.stack ? it.stack : it.gallery ? [{ id: 'quicksteps', label: 'Quick Steps' }] : [it]));
+function collapsedGroup(g, gi) {
+  const first = groupItems(g).find((x) => x.icon) || { icon: 'bolt' };
+  return `<div class="rgroup folded"><div class="rg-items"><button type="button" class="rb big" data-rgroup="${gi}" title="${esc(g.label)}">${icon(first.icon)}<span class="rl">${esc(g.label)}<i class="caret"></i></span></button></div><div class="rg-label">${esc(g.label)}</div></div>`;
+}
+function openFoldedGroup(btn) {
+  const g = (RIBBON[RB.tab] || RIBBON.home)[Number(btn.dataset.rgroup)];
+  const one = !!curMsg() && state.multi.size <= 1;
+  const any = state.view === 'mail' && (state.multi.size > 0 || !!state.selectedId);
+  const items = groupItems(g).map((it) => (it.search ? { id: 'searchpeople', label: 'Search People\u2026' } : it))
+    .filter((it) => !it.needs || (it.needs === 'one' ? one : any));
+  popMenu(btn, items.map((it) => [`${it.label.replace('/ ', '/')}${it.menu ? ' \u25B8' : ''}`, () => (it.id === 'searchpeople' ? searchPeople(prompt('Search People') || '') : RB_COMMANDS[it.id](btn))]));
+}
+function ribbonSync() {
+  const box = $('#ribbon');
+  if (!box || !state.me) return;
+  const inMail = state.view === 'mail';
+  const one = inMail && !!state.current && state.current.message.id === state.selectedId && state.multi.size <= 1;
+  const any = inMail && (state.multi.size > 0 || !!state.selectedId);
+  const f = currentFolder();
+  $$('[data-needs]', box).forEach((b) => { b.disabled = b.dataset.needs === 'one' ? !one : !any; });
+  $$('[data-folder-needs]', box).forEach((b) => { b.disabled = !inMail || !f || state.q || state.smart || (b.dataset.folderNeeds === 'custom' && !!f.role); });
+  $$('.qs', box).forEach((b) => { const s = RB.quickSteps?.[Number(b.dataset.qs)]; b.disabled = !s || (!any && !s.actions.every((a) => a.type === 'newmail')); });
+}
+
+// Which messages a ribbon command works on: the multi-selection, else the open message
+const targetIds = () => (state.multi.size ? [...state.multi] : state.selectedId ? [state.selectedId] : []);
+const curMsg = () => (state.current && state.current.message.id === state.selectedId ? state.current.message : null);
+function afterBulk(ids) {
+  state.messages = state.messages.filter((m) => !ids.includes(m.id));
+  if (ids.includes(state.selectedId)) { state.selectedId = null; closeReader(); }
+  state.multi.clear();
+  renderList(); loadFolders();
+}
+async function bulk(action, extra = {}) {
+  const ids = targetIds();
+  if (!ids.length) return;
+  await api('/messages/bulk', { method: 'POST', body: { ids, action, ...extra } });
+  return ids;
+}
+
+function pickFolder(title, { exclude } = {}) {
+  return new Promise((resolve) => {
+    const m = modal(`<h2>${esc(title)}</h2><div class="folder-pick">${state.folders.filter((f) => f.id !== exclude).map((f) => `<button type="button" class="btn" data-pick="${f.id}">${FOLDER_ICONS[f.role] || '\u{1F4C1}'} ${esc(f.name)}</button>`).join('')}</div>
+      <div class="actions"><button type="button" class="link-btn" data-newf>+ New folder</button><button class="btn" type="button" data-close>Cancel</button></div>`);
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    m.onclick = async (e) => {
+      const b = e.target.closest('[data-pick],[data-newf],[data-close]');
+      if (!b) return;
+      if (b.dataset.close !== undefined) return finish(null);
+      if (b.dataset.newf !== undefined) {
+        const name = prompt('New folder name');
+        if (!name?.trim()) return;
+        try { const { folder } = await api('/folders', { method: 'POST', body: { name } }); await loadFolders(); closeModal(); finish(folder); } catch (ex) { toast(ex.message); }
+        return;
+      }
+      closeModal(); finish(state.folders.find((f) => f.id === Number(b.dataset.pick)));
+    };
+    $('#modal').addEventListener('click', function off(e) { if (e.target.id === 'modal') { finish(null); $('#modal').removeEventListener('click', off); } });
+  });
+}
+
+// Follow Up dates, worked out in the user's own time zone
+function followUpDate(kind) {
+  const d = new Date(); d.setHours(17, 0, 0, 0);
+  if (kind === 'tomorrow') d.setDate(d.getDate() + 1);
+  if (kind === 'thisweek') { while (d.getDay() !== 5 && d.getDay() !== 0 && d.getDay() !== 6) d.setDate(d.getDate() + 1); if (d.getDay() !== 5) d.setDate(d.getDate() + 2); }
+  if (kind === 'nextweek') { d.setDate(d.getDate() + 7); while (d.getDay() !== 5) d.setDate(d.getDate() + (d.getDay() === 6 ? -1 : d.getDay() === 0 ? -2 : 1)); }
+  return d.toISOString();
+}
+async function followUp(state_, due_at) {
+  const ids = targetIds();
+  for (const id of ids) {
+    const { message } = await api(`/messages/${id}/followup`, { method: 'POST', body: { state: state_, due_at } });
+    Object.assign(state.messages.find((x) => x.id === id) || {}, { is_flagged: message.is_flagged, flag_due_at: message.flag_due_at, flag_completed_at: message.flag_completed_at });
+    if (state.current?.message.id === id) Object.assign(state.current.message, message);
+  }
+  renderList();
+  if (curMsg()) renderReader(state.current.message, state.current.thread);
+  toast(state_ === 'complete' ? 'Marked complete.' : state_ === 'clear' ? 'Flag cleared.' : due_at ? `Flagged. Due ${fmtDate(due_at, true)}.` : 'Flagged.');
+}
+async function setCategory(name, mode = 'toggle') {
+  for (const id of targetIds()) {
+    const m = state.messages.find((x) => x.id === id) || (state.current?.message.id === id ? state.current.message : null);
+    const cur = m?.categories || [];
+    const next = mode === 'clear' ? [] : cur.includes(name) ? cur.filter((c) => c !== name) : [...cur, name];
+    const { message } = await api(`/messages/${id}`, { method: 'PATCH', body: { categories: next } });
+    if (m) m.categories = message.categories;
+    if (state.current?.message.id === id) state.current.message.categories = message.categories;
+  }
+  renderList();
+  if (curMsg()) renderReader(state.current.message, state.current.thread);
+}
+
+// ------------------------------------------------------------ Quick Steps
+async function loadQuickSteps() {
+  try { RB.quickSteps = (await api('/me/quick-steps')).steps; } catch { RB.quickSteps = []; }
+}
+const STEP_LABELS = { move: 'Move to folder', archive: 'Archive', delete: 'Delete', read: 'Mark as read', unread: 'Mark as unread', flag: 'Flag', pin: 'Pin', category: 'Categorize', forward: 'Forward to', reply: 'Reply', replyall: 'Reply all', newmail: 'New email to' };
+const stepNeedsValue = (a) => ['move', 'category', 'forward', 'newmail'].includes(a.type) && !a.value;
+async function saveQuickSteps(steps) { RB.quickSteps = (await api('/me/quick-steps', { method: 'PUT', body: { steps } })).steps; renderRibbon(); }
+
+function editQuickStep(idx, { firstRun = false } = {}) {
+  const steps = RB.quickSteps.map((s) => ({ ...s, actions: s.actions.map((a) => ({ ...a })) }));
+  const s = idx === null ? { name: '', icon: 'bolt', actions: [{ type: 'move', value: null }] } : steps[idx];
+  return new Promise((resolve) => {
+    const row = (a, i) => `<div class="row qs-row" data-i="${i}"><label>Action<select name="type">${Object.entries(STEP_LABELS).map(([k, l]) => `<option value="${k}" ${a.type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="qs-val">${a.type === 'move' ? `Folder<select name="value"><option value="">Choose a folder</option>${state.folders.map((f) => `<option value="${f.id}" ${String(a.value) === String(f.id) ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>` : ['category', 'forward', 'newmail'].includes(a.type) ? `${a.type === 'category' ? 'Category' : 'To'}<input name="value" value="${esc(a.value || '')}" placeholder="${a.type === 'category' ? 'e.g. Blue category' : 'name@example.com'}">` : '<span class="muted small">No options</span>'}</label>
+      <button type="button" class="link-btn" data-rm="${i}">Remove</button></div>`;
+    const draw = () => {
+      const m = modal(`<h2>${firstRun ? 'First Time Setup' : idx === null ? 'New Quick Step' : 'Edit Quick Step'}</h2>
+        ${firstRun ? '<p class="muted">Choose what this Quick Step should do. You only have to do this once.</p>' : ''}
+        <form id="qs-form"><label>Name<input name="name" value="${esc(s.name)}" required maxlength="60"></label>
+        <div id="qs-actions">${s.actions.map(row).join('')}</div>
+        <button type="button" class="link-btn" id="qs-add">+ Add action</button>
+        <p class="form-error"></p>
+        <div class="actions">${idx !== null && !firstRun ? '<button type="button" class="btn danger" id="qs-del">Delete</button>' : ''}<button class="btn" type="button" data-close>Cancel</button><button class="btn primary">${firstRun ? 'Save and run' : 'Save'}</button></div></form>`);
+      const f = $('#qs-form', m);
+      const read = () => { s.name = f.name.value; s.actions = $$('.qs-row', f).map((r) => ({ type: $('[name="type"]', r).value, value: $('[name="value"]', r)?.value || null })); };
+      f.onchange = (e) => { if (e.target.name === 'type') { read(); draw(); } };
+      $('#qs-add', f).onclick = () => { read(); s.actions.push({ type: 'read', value: null }); draw(); };
+      f.onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { read(); s.actions.splice(Number(b.dataset.rm), 1); draw(); } };
+      const del = $('#qs-del', f);
+      if (del) del.onclick = async () => { steps.splice(idx, 1); await saveQuickSteps(steps); closeModal(); resolve(null); };
+      f.onsubmit = async (e) => {
+        e.preventDefault(); read();
+        if (s.actions.some(stepNeedsValue)) { $('.form-error', f).textContent = 'Fill in the folder, category or address for each action.'; return; }
+        const moveTo = s.actions.find((a) => a.type === 'move');
+        if (s.name === 'Move to: ?' && moveTo) s.name = `Move to: ${state.folders.find((x) => String(x.id) === String(moveTo.value))?.name || '?'}`;
+        if (idx === null) steps.push(s); else steps[idx] = s;
+        try { await saveQuickSteps(steps); closeModal(); resolve(idx === null ? steps.length - 1 : idx); } catch (ex) { $('.form-error', f).textContent = ex.message; }
+      };
+    };
+    draw();
+  });
+}
+function manageQuickSteps() {
+  const m = modal(`<h2>Manage Quick Steps</h2><div class="qs-manage">${RB.quickSteps.map((s, i) => `<div class="rule-row"><strong>${esc(s.name)}</strong><div class="small muted">${s.actions.map((a) => `${STEP_LABELS[a.type]}${a.value ? ` ${esc(a.type === 'move' ? state.folders.find((f) => String(f.id) === String(a.value))?.name || '?' : a.value)}` : ''}`).join(', ')}</div>
+    <button class="link-btn" data-edit="${i}">Edit</button>${i > 0 ? `<button class="link-btn" data-up="${i}">Move up</button>` : ''}</div>`).join('') || '<p class="muted">No Quick Steps.</p>'}</div>
+    <div class="actions"><button class="link-btn" id="qs-reset">Reset to defaults</button><button class="btn" id="qs-new">New Quick Step</button><button class="btn" data-close>Close</button></div>`);
+  m.onclick = async (e) => {
+    const b = e.target.closest('[data-edit],[data-up],#qs-new,#qs-reset');
+    if (!b) return;
+    if (b.id === 'qs-new') { await editQuickStep(null); return manageQuickSteps(); }
+    if (b.id === 'qs-reset') { RB.quickSteps = (await api('/me/quick-steps', { method: 'PUT', body: { reset: true } })).steps; renderRibbon(); return manageQuickSteps(); }
+    if (b.dataset.edit) { await editQuickStep(Number(b.dataset.edit)); return manageQuickSteps(); }
+    if (b.dataset.up) { const i = Number(b.dataset.up); const s = [...RB.quickSteps]; [s[i - 1], s[i]] = [s[i], s[i - 1]]; await saveQuickSteps(s); manageQuickSteps(); }
+  };
+}
+async function runQuickStep(idx) {
+  let step = RB.quickSteps[idx];
+  if (!step) return;
+  if (step.actions.some(stepNeedsValue)) {
+    const saved = await editQuickStep(idx, { firstRun: true });
+    if (saved === null || saved === undefined) return;
+    step = RB.quickSteps[saved];
+  }
+  const ids = targetIds();
+  const m = curMsg();
+  const compose = step.actions.filter((a) => ['forward', 'reply', 'replyall', 'newmail'].includes(a.type));
+  const rest = step.actions.filter((a) => !compose.includes(a));
+  let removed = false;
+  if (ids.length) {
+    for (const a of rest) {
+      if (a.type === 'move') { await api('/messages/bulk', { method: 'POST', body: { ids, action: 'move', folder_id: Number(a.value) } }); removed = true; }
+      else if (['archive', 'delete'].includes(a.type)) { await api('/messages/bulk', { method: 'POST', body: { ids, action: a.type } }); removed = true; }
+      else if (['read', 'unread', 'flag'].includes(a.type)) await api('/messages/bulk', { method: 'POST', body: { ids, action: a.type } });
+      else if (a.type === 'pin') for (const id of ids) await api(`/messages/${id}`, { method: 'PATCH', body: { is_pinned: true } });
+      else if (a.type === 'category') await setCategory(a.value, 'add');
+    }
+  }
+  if (removed) afterBulk(ids); else if (ids.length) { await loadList(); loadFolders(); }
+  for (const a of compose) {
+    if (a.type === 'newmail') openComposer('new', null, { prefill: { to: a.value } });
+    else if (m) openComposer(a.type, m, a.type === 'forward' ? { prefill: { to: a.value } } : {});
+  }
+  if (!compose.length) toast(`${step.name}: done.`);
+}
+
+// ------------------------------------------------------------ groups, people and the address book
+function groupDialog(g = {}) {
+  const m = modal(`<h2>${g.id ? 'Edit group' : 'New group'}</h2><form id="grp-form">
+    <label>Group name<input name="name" value="${esc(g.name || '')}" required maxlength="80"></label>
+    <label>Description<input name="description" value="${esc(g.description || '')}"></label>
+    <label>Members (separate with commas)<textarea name="members" rows="4" placeholder="name@example.com, …">${esc((g.members || []).map((x) => (x.name ? `${x.name} <${x.email}>` : x.email)).join(', '))}</textarea></label>
+    <p class="muted small">A contact group lets you email everyone at once. Pick it in the Address Book or from Browse Groups.</p>
+    <p class="form-error"></p><div class="actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary">${g.id ? 'Save' : 'Create'}</button></div></form>`);
+  const f = $('#grp-form', m);
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const members = f.members.value.split(/[,;\n]+/).map((x) => x.trim()).filter(Boolean).map((x) => { const mm = x.match(/^(.*)<([^>]+)>$/); return mm ? { name: mm[1].trim().replace(/^"|"$/g, ''), email: mm[2].trim() } : { email: x }; });
+    try {
+      await api(g.id ? `/contact-lists/${g.id}` : '/contact-lists', { method: g.id ? 'PUT' : 'POST', body: { name: f.name.value, description: f.description.value, members } });
+      closeModal(); toast(g.id ? 'Group saved.' : 'Group created.');
+    } catch (ex) { $('.form-error', f).textContent = ex.message; }
+  };
+}
+async function browseGroups() {
+  const { org, lists } = await api('/groups/directory');
+  const m = modal(`<h2>Browse Groups</h2>
+    <h3>My contact groups</h3>${lists.length ? `<table class="people">${lists.map((l) => `<tr><td><strong>${esc(l.name)}</strong><div class="small muted">${l.members.length} member${l.members.length === 1 ? '' : 's'}${l.description ? ` · ${esc(l.description)}` : ''}</div></td>
+      <td><button class="link-btn" data-mail-list="${l.id}">Email group</button><button class="link-btn" data-edit-list="${l.id}">Edit</button><button class="link-btn" data-del-list="${l.id}">Delete</button></td></tr>`).join('')}</table>` : '<p class="muted">No contact groups yet.</p>'}
+    ${org.length ? `<h3>Your organization's groups</h3><table class="people">${org.map((g) => `<tr><td><strong>${esc(g.name)}</strong> ${g.is_member ? '<span class="tag">Member</span>' : ''}<div class="small muted">${esc(g.address)} · ${g.member_count} members${g.description ? ` · ${esc(g.description)}` : ''}</div></td>
+      <td><button class="link-btn" data-mailto="${esc(g.address)}">Email group</button></td></tr>`).join('')}</table>` : ''}
+    <div class="actions"><button class="btn" id="grp-new">New group</button><button class="btn" data-close>Close</button></div>`);
+  m.onclick = async (e) => {
+    const b = e.target.closest('[data-mail-list],[data-edit-list],[data-del-list],[data-mailto],#grp-new');
+    if (!b) return;
+    const l = lists.find((x) => String(x.id) === (b.dataset.mailList || b.dataset.editList || b.dataset.delList));
+    if (b.id === 'grp-new') return groupDialog();
+    if (b.dataset.mailto) { closeModal(); showMailView(); return openComposer('new', null, { prefill: { to: b.dataset.mailto } }); }
+    if (b.dataset.mailList) { closeModal(); showMailView(); return openComposer('new', null, { prefill: { to: l.members.map((x) => fmtAddr({ name: x.name, address: x.email })).join(', ') } }); }
+    if (b.dataset.editList) return groupDialog(l);
+    if (b.dataset.delList && confirm(`Delete the group "${l.name}"? The contacts themselves are kept.`)) { await api(`/contact-lists/${l.id}`, { method: 'DELETE' }); browseGroups(); }
+  };
+}
+async function addressBook(q = '', picked = new Map()) {
+  const r = await api(`/address-book?q=${encodeURIComponent(q)}`);
+  const rows = [
+    ...r.lists.map((l) => ({ key: `list:${l.id}`, name: l.name, email: `${l.members.length} members`, kind: 'Contact group', addrs: l.members.map((x) => fmtAddr({ name: x.name, address: x.email })) })),
+    ...r.groups.map((g) => ({ key: g.email, name: g.name, email: g.email, kind: 'Group', addrs: [fmtAddr({ name: g.name, address: g.email })] })),
+    ...r.directory.map((p) => ({ key: p.email, name: p.name, email: p.email, kind: 'Organization', addrs: [fmtAddr({ name: p.name, address: p.email })] })),
+    ...r.contacts.filter((c) => !r.directory.some((p) => p.email === c.email)).map((c) => ({ key: c.email, name: c.name, email: c.email, kind: [c.job_title, c.company].filter(Boolean).join(', ') || 'Contact', addrs: [fmtAddr({ name: c.name, address: c.email })] })),
+  ];
+  const m = modal(`<h2>Address Book</h2>
+    <input id="ab-q" type="search" placeholder="Search by name, email or company" value="${esc(q)}" class="ab-search">
+    <div class="ab-list">${rows.map((x) => `<label class="ab-row"><input type="checkbox" data-key="${esc(x.key)}" ${picked.has(x.key) ? 'checked' : ''}><span class="lavatar">${esc(initials(x.name, x.email))}</span><span><strong>${esc(x.name || x.email)}</strong><span class="small muted"> ${esc(x.email)}</span><br><span class="small muted">${esc(x.kind)}</span></span></label>`).join('') || '<p class="muted">Nobody found. Save people in People, or create a contact group.</p>'}</div>
+    <div class="actions"><span class="muted small" id="ab-count">${picked.size} selected</span><button class="btn" data-close>Cancel</button><button class="btn primary" id="ab-to">Email selected</button></div>`);
+  let t;
+  $('#ab-q', m).oninput = (e) => { clearTimeout(t); t = setTimeout(() => addressBook(e.target.value, picked).then(() => { const i = $('#ab-q'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }), 250); };
+  m.onchange = (e) => {
+    const k = e.target.dataset?.key;
+    if (!k) return;
+    const row = rows.find((x) => x.key === k);
+    if (e.target.checked) picked.set(k, row.addrs); else picked.delete(k);
+    $('#ab-count', m).textContent = `${picked.size} selected`;
+  };
+  $('#ab-to', m).onclick = () => {
+    const to = [...picked.values()].flat();
+    if (!to.length) return toast('Pick at least one person or group.');
+    closeModal(); showMailView();
+    if (state.composer && !$('#composer').classList.contains('hidden')) { const i = $('#c-to'); i.value = [i.value.trim().replace(/,$/, ''), ...to].filter(Boolean).join(', '); }
+    else openComposer('new', null, { prefill: { to: to.join(', ') } });
+  };
+}
+async function searchPeople(q) {
+  if (!q.trim()) return addressBook();
+  const r = await api(`/address-book?q=${encodeURIComponent(q)}`);
+  const people_ = [...r.directory, ...r.contacts.filter((c) => !r.directory.some((p) => p.email === c.email))];
+  const m = modal(`<h2>People matching "${esc(q)}"</h2>${people_.map((p) => `<div class="person-card"><span class="avatar">${esc(initials(p.name, p.email))}</span><div><strong>${esc(p.name || p.email)}</strong><div class="small muted">${esc(p.email)}${p.job_title || p.company ? ` · ${esc([p.job_title, p.company].filter(Boolean).join(', '))}` : ''}${p.phone ? ` · ${esc(p.phone)}` : ''}</div></div>
+      <div class="pc-actions"><button class="btn small" data-mail="${esc(p.email)}">Email</button><button class="btn small" data-meet="${esc(p.email)}">Meeting</button><button class="btn small" data-find="${esc(p.email)}">Find mail</button></div></div>`).join('') || '<p class="muted">Nobody found.</p>'}
+    ${r.lists.map((l) => `<div class="person-card"><span class="avatar">\u{1F465}</span><div><strong>${esc(l.name)}</strong><div class="small muted">Contact group · ${l.members.length} members</div></div><div class="pc-actions"><button class="btn small" data-mail="${esc(l.members.map((x) => x.email).join(', '))}">Email</button></div></div>`).join('')}
+    <div class="actions"><button class="btn" data-close>Close</button></div>`);
+  m.onclick = (e) => {
+    const b = e.target.closest('[data-mail],[data-meet],[data-find]');
+    if (!b) return;
+    closeModal();
+    if (b.dataset.mail) { showMailView(); openComposer('new', null, { prefill: { to: b.dataset.mail } }); }
+    if (b.dataset.meet) editEvent({ attendees: [{ email: b.dataset.meet }] }, $('#full-pane'));
+    if (b.dataset.find) { showMailView(); $('#search-input').value = b.dataset.find; $('#search-form').requestSubmit(); }
+  };
+}
+
+// ------------------------------------------------------------ Read Aloud
+const speech = { on: false, paused: false, rate: 1 };
+function readAloud() {
+  const m = curMsg();
+  if (!m) return;
+  if (!('speechSynthesis' in window)) return toast('This browser cannot read aloud.');
+  stopReading();
+  const body = m.text_body || '';
+  const qi = quoteIndex(body);
+  const own = qi > 0 ? body.slice(0, qi) : body;
+  const text = `From ${m.from_name || m.from_addr}. ${m.subject || 'No subject'}. ${own.replace(/^>.*$/gm, '').replace(/https?:\/\/\S+/g, 'link')}`;
+  const parts = text.match(/[^.!?\n]+[.!?\n]*|\S+/g) || [text];
+  speech.on = true; speech.paused = false;
+  let bar = $('#read-aloud');
+  if (!bar) { bar = document.createElement('div'); bar.id = 'read-aloud'; bar.className = 'read-aloud'; document.body.appendChild(bar); }
+  bar.innerHTML = `${icon('speaker')}<span>Reading "${esc(m.subject || '(no subject)')}"</span>
+    <button class="btn small" data-ra="pause">⏸ Pause</button><select data-ra="rate" aria-label="Reading speed">${[0.75, 1, 1.25, 1.5].map((r) => `<option value="${r}" ${r === speech.rate ? 'selected' : ''}>${r}x</option>`).join('')}</select><button class="btn small" data-ra="stop">⏹ Stop</button>`;
+  bar.classList.remove('hidden');
+  bar.onclick = (e) => {
+    const b = e.target.closest('button[data-ra]');
+    if (!b) return;
+    if (b.dataset.ra === 'stop') return stopReading();
+    if (speech.paused) { speechSynthesis.resume(); speech.paused = false; b.textContent = '⏸ Pause'; } else { speechSynthesis.pause(); speech.paused = true; b.textContent = '▶ Resume'; }
+  };
+  $('select', bar).onchange = (e) => { speech.rate = Number(e.target.value); readAloud(); };
+  parts.forEach((p, i) => {
+    const u = new SpeechSynthesisUtterance(p.trim());
+    u.rate = speech.rate;
+    if (i === parts.length - 1) u.onend = () => stopReading();
+    speechSynthesis.speak(u);
+  });
+}
+function stopReading() {
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  speech.on = false;
+  $('#read-aloud')?.classList.add('hidden');
+}
+
+// ------------------------------------------------------------ Insights
+async function showInsights() {
+  const r = await api('/insights');
+  const tile = (n, label, warn) => `<div class="ins-tile${warn ? ' warn' : ''}"><strong>${n}</strong><span>${esc(label)}</span></div>`;
+  const max = Math.max(1, ...r.topSenders.map((s) => s.n));
+  modal(`<h2>${icon('insights')} Insights</h2><p class="muted">Your week in mail and meetings. Only you can see this.</p>
+    <div class="ins-grid">${tile(r.week.received, 'messages received in the last 7 days')}${tile(r.week.sent, 'messages you sent')}${tile(r.week.unread, 'unread in your Inbox', r.week.unread > 20)}
+    ${tile(r.week.flagged, 'flagged for follow-up')}${tile(r.week.overdue, 'follow-ups past due', r.week.overdue > 0)}${tile(r.week.needsReply, 'probably need a reply')}</div>
+    <h3>Your calendar this week</h3>
+    <div class="ins-grid">${tile(r.meetings.count, 'meetings')}${tile(`${r.meetings.hours} h`, 'in meetings')}${tile(`${r.meetings.focusHours} h`, 'left for focus work (of a 40-hour week)')}</div>
+    <h3>Who you hear from most (30 days)</h3>
+    ${r.topSenders.length ? r.topSenders.map((s) => `<div class="ins-bar"><span>${esc(s.name || s.email)}</span><div><i style="width:${Math.round((s.n / max) * 100)}%"></i></div><b>${s.n}</b></div>`).join('') : '<p class="muted">Nothing yet.</p>'}
+    <div class="actions">${r.week.overdue ? '<button class="btn" id="ins-flagged">Show flagged mail</button>' : ''}<button class="btn" data-close>Close</button></div>`);
+  $('#ins-flagged')?.addEventListener('click', () => { closeModal(); $('[data-smart="flagged"]').click(); });
+}
+
+// ------------------------------------------------------------ commands
+async function saveAsFile(id) {
+  const res = await fetch(`/api/messages/${id}/eml`, { credentials: 'same-origin', headers: state.mailbox ? { 'x-arzio-mailbox': String(state.mailbox.id) } : {} });
+  if (!res.ok) throw new Error('Could not save the message.');
+  const name = decodeURIComponent((res.headers.get('content-disposition') || '').match(/filename\*=UTF-8''([^;]+)/)?.[1] || 'message.eml');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await res.blob()); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function meetingFrom(m) {
+  const me = state.me.email;
+  const seen = new Set([me]);
+  const att = [{ address: m.from_addr, name: m.from_name }, ...(m.to || []), ...(m.cc || [])].filter((p) => p.address && !seen.has(p.address) && seen.add(p.address));
+  editEvent({ title: (m.subject || '').replace(/^(re|fw|fwd):\s*/i, ''), attendees: att.map((p) => ({ email: p.address, name: p.name })), description: `${(m.text_body || '').slice(0, 1500)}` }, $('#full-pane'));
+}
+function forwardAsAttachment() {
+  const ids = targetIds();
+  const first = state.messages.find((x) => x.id === ids[0]) || curMsg();
+  openComposer('new', null, { prefill: { subject: ids.length > 1 ? 'Fw: messages' : `Fw: ${first?.subject || ''}`, attachMessages: ids } });
+}
+async function setFilter(v) {
+  RB.filter = v || null;
+  showMailView();
+  state.selectedId = null; closeReader();
+  await loadList();
+}
+
+const RB_COMMANDS = {
+  newmail: () => $('#new-mail-btn').click(),
+  newitems: (b) => popMenu(b, [
+    ['✉ Email message', () => $('#new-mail-btn').click()],
+    ['\u{1F4C5} Meeting or event', () => editEvent({}, $('#full-pane'))],
+    ['☑ Task', () => showView('tasks')],
+    ['\u{1F464} Contact', async () => { await showView('people'); $('#new-contact')?.click(); }],
+    ['\u{1F465} Contact group', () => groupDialog()],
+    ['\u{1F4C1} Folder', () => $('#new-folder-btn').click()],
+    ['⚡ Quick Step', async () => { await editQuickStep(null); }],
+    ['⚙ Rule', () => openSettings('rules')],
+  ]),
+  ignore: async () => {
+    const m = curMsg();
+    const inTrash = currentFolder()?.role === 'trash';
+    if (inTrash) {
+      if (!confirm('Stop ignoring this conversation? Its messages go back to the Inbox.')) return;
+      const r = await api(`/messages/${m.id}/ignore`, { method: 'POST', body: { ignore: false } });
+      toast(`No longer ignored. ${r.moved} message(s) moved to the Inbox.`); refresh(); closeReader(); return;
+    }
+    if (!confirm('Ignore this conversation? Its messages, and any replies that come later, go to Deleted Items.')) return;
+    const r = await api(`/messages/${m.id}/ignore`, { method: 'POST', body: { ignore: true } });
+    toast(`Conversation ignored. ${r.moved} message(s) moved to Deleted Items.`);
+    state.selectedId = null; closeReader(); refresh();
+  },
+  cleanup: (b) => popMenu(b, [
+    ['Clean Up Conversation', async () => {
+      const m = curMsg();
+      if (!m) return toast('Open a conversation first.');
+      const r = await api(`/messages/${m.id}/cleanup`, { method: 'POST', body: {} });
+      toast(r.removed ? `Cleaned up ${r.removed} redundant message(s).` : 'Nothing to clean up: no message is fully quoted by a later one.');
+      if (r.removed) openMessage(m.id).catch(() => closeReader());
+      loadList(); loadFolders();
+    }],
+    ['Clean Up Folder', () => RB_COMMANDS.cleanupfolder()],
+  ]),
+  junk: (b) => {
+    const ids = targetIds();
+    const m = curMsg() || state.messages.find((x) => x.id === ids[0]);
+    const inJunk = currentFolder()?.role === 'junk';
+    const domain = m?.from_addr?.includes('@') ? `@${m.from_addr.split('@')[1]}` : null;
+    popMenu(b, [
+      ['Block Sender', async () => { for (const id of ids) await api(`/messages/${id}/report`, { method: 'POST', body: { junk: true } }); toast('Sender blocked. Their mail goes to Junk Email.'); afterBulk(ids); }],
+      ['Never Block Sender', async () => { await api('/senders', { method: 'POST', body: { address: m.from_addr, kind: 'safe' } }); toast(`${m.from_addr} is now a safe sender.`); }],
+      ...(domain ? [[`Never Block Sender's Domain (${domain})`, async () => { await api('/senders', { method: 'POST', body: { address: domain, kind: 'safe' } }); toast(`${domain} is now a safe domain.`); }]] : []),
+      ...(inJunk ? [['Not Junk', async () => { for (const id of ids) await api(`/messages/${id}/report`, { method: 'POST', body: { junk: false } }); toast('Moved to the Inbox. Sender marked safe.'); afterBulk(ids); }]]
+        : [['Move to Junk Email', async () => { await bulk('junk'); toast('Moved to Junk Email.'); afterBulk(ids); }]]),
+      ['Junk Email Options…', () => openSettings('junk')],
+    ]);
+  },
+  delete: async () => {
+    const ids = targetIds();
+    const perm = currentFolder()?.role === 'trash';
+    if (perm && !confirm(`Permanently delete ${ids.length} message(s)? This can't be undone.`)) return;
+    await bulk('delete');
+    toast(perm ? 'Permanently deleted.' : 'Moved to Deleted Items.'); afterBulk(ids);
+  },
+  archive: async () => { const ids = await bulk('archive'); toast('Archived.'); afterBulk(ids); },
+  reply: () => openComposer('reply', curMsg()),
+  replyall: () => openComposer('replyall', curMsg()),
+  forward: () => openComposer('forward', curMsg()),
+  meeting: () => meetingFrom(curMsg()),
+  fwdattach: () => forwardAsAttachment(),
+  respondmore: (b) => popMenu(b, [
+    ['Reply All with Meeting', () => meetingFrom(curMsg())],
+    ['Forward as Attachment', () => forwardAsAttachment()],
+    ['Draft a reply with Arzio AI', () => openComposer('reply', curMsg(), { ai: true })],
+    ['Add to To Do', async () => { const m = curMsg(); await api('/tasks', { method: 'POST', body: { title: m.subject || '(no subject)', notes: `From ${m.from_name || m.from_addr}`, message_id: m.id } }); toast('Added to To Do.'); }],
+    ['Print', () => printMessage(curMsg(), state.current.thread)],
+  ]),
+  quicksteps: (b) => popMenu(b, [
+    ...RB.quickSteps.map((s, i) => [`⚡ ${s.name}`, () => runQuickStep(i)]),
+    ['+ New Quick Step', async () => { await editQuickStep(null); }],
+    ['Manage Quick Steps…', () => manageQuickSteps()],
+  ]),
+  managesteps: () => manageQuickSteps(),
+  move: (b) => {
+    const ids = targetIds();
+    const f = currentFolder();
+    const quick = state.folders.filter((x) => x.id !== f?.id && !['drafts', 'sent'].includes(x.role)).slice(0, 10);
+    popMenu(b, [
+      ...quick.map((x) => [`${FOLDER_ICONS[x.role] || '\u{1F4C1}'} ${x.name}`, async () => { await bulk('move', { folder_id: x.id }); toast(`Moved to ${x.name}.`); afterBulk(ids); }]),
+      ['Other Folder…', async () => { const x = await pickFolder('Move to folder', { exclude: f?.id }); if (x) { await api('/messages/bulk', { method: 'POST', body: { ids, action: 'move', folder_id: x.id } }); toast(`Moved to ${x.name}.`); afterBulk(ids); } }],
+    ]);
+  },
+  rules: (b) => {
+    const m = curMsg();
+    popMenu(b, [
+      ...(m ? [[`Always Move Messages From: ${m.from_name || m.from_addr}`, async () => {
+        const x = await pickFolder(`Move mail from ${m.from_addr} to`);
+        if (!x) return;
+        await api('/rules', { method: 'POST', body: { name: `From ${m.from_addr}`, conditions: [{ field: 'from', op: 'contains', value: m.from_addr }], actions: [{ type: 'move', value: String(x.id) }, { type: 'stop' }] } });
+        const r = await api('/rules/run', { method: 'POST', body: {} });
+        toast(`Rule created. Checked ${r.processed} message(s) in the Inbox.`); refresh();
+      }], ['Create Rule…', () => openSettings('rules', { from: m.from_addr, subject: m.subject })]] : []),
+      ['Manage Rules & Alerts', () => openSettings('rules')],
+    ]);
+  },
+  savefile: () => saveAsFile(curMsg().id),
+  unreadread: async () => {
+    const ids = targetIds();
+    const msgs = ids.map((id) => state.messages.find((x) => x.id === id)).filter(Boolean);
+    const makeRead = msgs.some((x) => !x.is_read);
+    await bulk(makeRead ? 'read' : 'unread');
+    msgs.forEach((x) => { x.is_read = makeRead; });
+    if (!makeRead && ids.includes(state.selectedId)) { state.selectedId = null; closeReader(); }
+    renderList(); loadFolders();
+    toast(makeRead ? 'Marked as read.' : 'Marked as unread.');
+  },
+  categorize: (b) => {
+    const ids = targetIds();
+    const used = new Set(CATEGORY_PRESETS.map(([n]) => n));
+    const extra = [...new Set(state.messages.flatMap((x) => x.categories || []))].filter((c) => !used.has(c));
+    const has = (c) => ids.every((id) => (state.messages.find((x) => x.id === id)?.categories || []).includes(c));
+    popMenu(b, [
+      ...CATEGORY_PRESETS.map(([n, dot]) => [`${has(n) ? '✔ ' : ''}${dot} ${n}`, () => setCategory(n)]),
+      ...extra.map((n) => [`${has(n) ? '✔ ' : ''}\u{1F3F7} ${n}`, () => setCategory(n)]),
+      ['New Category…', async () => { const n = prompt('Name the new category'); if (n?.trim()) await setCategory(n.trim().slice(0, 40), 'add'); }],
+      ['Clear All Categories', () => setCategory('', 'clear')],
+    ]);
+  },
+  followup: (b) => popMenu(b, [
+    ['\u{1F6A9} Today', () => followUp('flagged', followUpDate('today'))],
+    ['\u{1F6A9} Tomorrow', () => followUp('flagged', followUpDate('tomorrow'))],
+    ['\u{1F6A9} This Week', () => followUp('flagged', followUpDate('thisweek'))],
+    ['\u{1F6A9} Next Week', () => followUp('flagged', followUpDate('nextweek'))],
+    ['\u{1F6A9} No Date', () => followUp('flagged', null)],
+    ['✔ Mark Complete', () => followUp('complete')],
+    ['Clear Flag', () => followUp('clear')],
+  ], { datetime: (when) => followUp('flagged', when) }),
+  newgroup: () => groupDialog(),
+  browsegroups: () => browseGroups(),
+  addressbook: () => addressBook(),
+  filter: (b) => popMenu(b, FILTERS.map(([v, l]) => [`${(RB.filter || '') === v ? '✔ ' : ''}${l}`, () => setFilter(v)])),
+  readaloud: () => (speech.on ? stopReading() : readAloud()),
+  translate: (b) => readerAction('translate', curMsg(), state.current.thread, b),
+  summarize: (b) => readerAction('summarize', curMsg(), state.current.thread, $('#reader [data-act="summarize"]') || b),
+  aidraft: () => openComposer('reply', curMsg(), { ai: true }),
+  ask: () => $('#ask-btn').click(),
+  insights: () => showInsights(),
+  // Send / Receive
+  sendreceive: async () => { await refresh(); pollNotifications?.(); toast('All folders are up to date.'); },
+  updatefolder: async () => { await loadList(); toast('Folder updated.'); },
+  outbox: () => { showMailView(); $('[data-smart="scheduled"]').click(); },
+  ooo: () => openSettings('ooo'),
+  undosend: () => openSettings('general'),
+  // Folder
+  newfolder: () => $('#new-folder-btn').click(),
+  renamefolder: async () => { const f = currentFolder(); const name = prompt('Folder name', f.name); if (name?.trim()) { await api(`/folders/${f.id}`, { method: 'PATCH', body: { name } }); await loadFolders(); renderRibbon(); } },
+  deletefolder: async () => {
+    const f = currentFolder();
+    if (!confirm(`Delete "${f.name}"? Its messages move to Deleted Items.`)) return;
+    await api(`/folders/${f.id}`, { method: 'DELETE' }); state.folderId = null; await loadFolders(); selectFolder(state.folders[0].id);
+  },
+  markallread: async () => {
+    const f = currentFolder();
+    const r = await api(`/messages?folder=${f.id}&unread=1&limit=200`);
+    if (r.messages.length) await api('/messages/bulk', { method: 'POST', body: { ids: r.messages.map((m) => m.id), action: 'read' } });
+    toast(`Marked ${r.messages.length} message(s) as read.`); refresh();
+  },
+  cleanupfolder: async () => {
+    const f = currentFolder();
+    if (!confirm(`Clean up "${f.name}"? Messages fully quoted by a later reply in the same conversation move to Deleted Items. Flagged and pinned messages are kept.`)) return;
+    const r = await api(`/folders/${f.id}/cleanup`, { method: 'POST', body: {} });
+    toast(r.removed ? `Cleaned up ${r.removed} redundant message(s).` : 'Nothing to clean up.'); refresh();
+  },
+  emptyfolder: async () => {
+    const f = currentFolder();
+    const perm = ['trash', 'junk'].includes(f.role);
+    if (!confirm(perm ? `Permanently delete everything in ${f.name}? This can't be undone.` : `Move everything in ${f.name} to Deleted Items?`)) return;
+    let total = 0;
+    for (;;) {
+      const r = await api(`/messages?folder=${f.id}&limit=200`);
+      if (!r.messages.length) break;
+      if (perm) for (const m of r.messages) await api(`/messages/${m.id}`, { method: 'DELETE' });
+      else await api('/messages/bulk', { method: 'POST', body: { ids: r.messages.map((m) => m.id), action: 'delete' } });
+      total += r.messages.length;
+      if (r.messages.length < 200 || total > 5000) break;
+    }
+    if (f.role === 'junk') { const r = await api(`/messages?folder=${f.id}&limit=200`); for (const m of r.messages) await api(`/messages/${m.id}`, { method: 'DELETE' }); }
+    toast(`Deleted ${total} message(s).`); closeReader(); refresh();
+  },
+  favorite: async () => { await toggleFavorite(`folder:${currentFolder().id}`); },
+  folderprops: () => {
+    const f = currentFolder();
+    modal(`<h2>${esc(f.name)} properties</h2><table><tr><th>Type</th><td>${f.role ? 'Standard folder' : 'Your folder'}</td></tr><tr><th>Items</th><td>${f.total}</td></tr><tr><th>Unread</th><td>${f.unread}</td></tr>
+      <tr><th>In Favorites</th><td>${(ui().favorites || []).includes(`folder:${f.id}`) ? 'Yes' : 'No'}</td></tr></table><div class="actions"><button class="btn" data-close>Close</button></div>`);
+  },
+  // View
+  changeview: (b) => popMenu(b, [['roomy', 'Preview (roomy)'], ['comfortable', 'Single (comfortable)'], ['compact', 'Compact']].map(([v, l]) => [`${(ui().density || 'comfortable') === v ? '✔ ' : ''}${l}`, () => saveUi({ density: v })])),
+  resetview: async () => { await saveUi({ density: 'comfortable', readingPane: 'right', conversations: true, previewText: true, senderImages: true, sort: 'date', folderPane: true, textSize: 'medium' }); RB.filter = null; loadList(); toast('View reset.'); },
+  conversations: async () => { await saveUi({ conversations: ui().conversations === false }); renderRibbon(); if (curMsg()) openMessage(state.selectedId); },
+  sortby: (b) => popMenu(b, SORTS_UI.map(([v, l]) => [`${(ui().sort || 'date') === v ? '✔ ' : ''}${l}`, async () => { await saveUi({ sort: v }); loadList(); }])),
+  preview: (b) => popMenu(b, [
+    [`${ui().previewText !== false ? '✔ ' : ''}Show message preview text`, async () => { await saveUi({ previewText: ui().previewText === false }); renderList(); }],
+    [`${ui().senderImages !== false ? '✔ ' : ''}Show sender pictures`, async () => { await saveUi({ senderImages: ui().senderImages === false }); renderList(); }],
+  ]),
+  folderpane: async () => { await saveUi({ folderPane: ui().folderPane === false }); renderRibbon(); },
+  readingpane: (b) => popMenu(b, [['right', 'Right'], ['bottom', 'Bottom'], ['off', 'Off']].map(([v, l]) => [`${(ui().readingPane || 'right') === v ? '✔ ' : ''}${l}`, () => saveUi({ readingPane: v })])),
+  ribbonmode: (b) => popMenu(b, [['classic', 'Classic ribbon'], ['simplified', 'Simplified ribbon']].map(([v, l]) => [`${(ui().ribbon || 'classic') === v ? '✔ ' : ''}${l}`, async () => { await saveUi({ ribbon: v }); renderRibbon(); }])),
+  ribbonflip: async () => { await saveUi({ ribbon: (ui().ribbon || 'classic') === 'classic' ? 'simplified' : 'classic' }); renderRibbon(); },
+  textsize: (b) => popMenu(b, [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']].map(([v, l]) => [`${(ui().textSize || 'medium') === v ? '✔ ' : ''}${l}`, () => saveUi({ textSize: v })])),
+  darkmode: async () => { await saveUi({ theme: document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark' }); renderRibbon(); },
+  appearance: () => openSettings('appearance'),
+  reminders: () => $('#bell-btn').click(),
+  // Help
+  shortcuts: () => showShortcuts(),
+  whatsnew: () => modal(`<h2>What's new</h2><ul class="whatsnew">
+    <li><strong>The ribbon.</strong> Home, Send / Receive, Folder, View and Help tabs, with a Classic or Simplified layout.</li>
+    <li><strong>Quick Steps.</strong> One click to move, file, forward to your manager or email your team.</li>
+    <li><strong>Ignore and Clean Up.</strong> Silence a conversation, or remove messages that a later reply already quotes.</li>
+    <li><strong>Follow Up dates.</strong> Flag for today, tomorrow, this week or next week, then mark complete.</li>
+    <li><strong>Contact groups, Address Book and Search People.</strong></li>
+    <li><strong>Read Aloud, Filter Email, Arrange By and Insights.</strong></li>
+    <li><strong>Select several messages</strong> with Ctrl+click or Shift+click and act on them together.</li></ul>
+    <div class="actions"><button class="btn" data-close>Close</button></div>`),
+  about: () => modal(`<h2>About ${esc(state.service?.name || 'Arzio Mail')}</h2><p>${esc(state.service?.name || 'Arzio Mail')} is mail, calendar, people and tasks in one place, with AI that helps you read and write.</p>
+    <p class="muted small">Signed in as ${esc(state.me.email)}.</p><div class="actions"><button class="btn" data-close>Close</button></div>`),
+  options: () => openSettings(),
+};
+
+function fileMenu(anchor) {
+  const m = curMsg();
+  popMenu(anchor, [
+    ['ℹ Info: account and storage', () => openSettings('general')],
+    ...(m ? [['\u{1F4BE} Save As (.eml)', () => saveAsFile(m.id)], ['\u{1F5A8} Print', () => printMessage(m, state.current.thread)]] : []),
+    ['✉ Automatic Replies', () => openSettings('ooo')],
+    ['⚙ Rules and Alerts', () => openSettings('rules')],
+    ['\u{1F6E0} Options', () => openSettings()],
+    ['⏻ Sign out', () => $('[data-action="logout"]').click()],
+  ]);
+}
+
+$('#ribbon')?.addEventListener('click', async (e) => {
+  const tab = e.target.closest('[data-rtab]');
+  if (tab) {
+    if (tab.dataset.rtab === 'file') return fileMenu(tab);
+    RB.tab = tab.dataset.rtab; renderRibbon(); return;
+  }
+  const folded = e.target.closest('[data-rgroup]');
+  if (folded) return openFoldedGroup(folded);
+  const qs = e.target.closest('[data-qs]');
+  if (qs) { try { await runQuickStep(Number(qs.dataset.qs)); } catch (ex) { toast(ex.message); } return; }
+  const b = e.target.closest('[data-rb]');
+  if (!b || b.disabled) return;
+  const cmd = RB_COMMANDS[b.dataset.rb];
+  if (!cmd) return;
+  e.stopPropagation();
+  try { await cmd(b); } catch (ex) { toast(ex.message); }
+});
+$('#ribbon')?.addEventListener('keydown', (e) => {
+  if (e.target.id === 'rb-people' && e.key === 'Enter') { e.preventDefault(); searchPeople(e.target.value).catch((ex) => toast(ex.message)); }
+});
+
+// Ctrl/Cmd+click and Shift+click select several messages, like Outlook
+$('#msg-list').addEventListener('click', (e) => {
+  const li = e.target.closest('.msg[data-id]');
+  if (!li || !(e.ctrlKey || e.metaKey || e.shiftKey)) return;
+  e.stopImmediatePropagation(); e.preventDefault();
+  const id = Number(li.dataset.id);
+  if (!state.multi.size && state.selectedId) state.multi.add(state.selectedId);
+  if (e.shiftKey && state.multi.size) {
+    const ids = state.messages.map((m) => m.id);
+    const anchor = ids.indexOf([...state.multi].pop());
+    const at = ids.indexOf(id);
+    for (const x of ids.slice(Math.min(anchor, at), Math.max(anchor, at) + 1)) state.multi.add(x);
+  } else if (state.multi.has(id)) state.multi.delete(id); else state.multi.add(id);
+  if (state.multi.size === 1) { const only = [...state.multi][0]; state.multi.clear(); openMessage(only); return; }
+  state.selectedId = null;
+  closeReader();
+  $('#empty-state p').textContent = state.multi.size ? `${state.multi.size} items selected` : 'Select an item to read';
+  renderList();
+}, true);
+$('#filter-chip').addEventListener('click', (e) => { if (e.target.closest('[data-clear-filter]')) setFilter(null); });
+let ribbonResize;
+window.addEventListener('resize', () => { clearTimeout(ribbonResize); ribbonResize = setTimeout(() => { if (state.me) renderRibbon(); }, 150); });

@@ -111,12 +111,14 @@ const UI_KEYS = {
   readingPane: ['right', 'bottom', 'off'],
   textSize: ['small', 'medium', 'large'],
   shortcuts: ['outlook', 'gmail', 'off'],
+  ribbon: ['classic', 'simplified'],
+  sort: ['date', 'date-asc', 'from', 'subject', 'size', 'importance', 'flag'],
 };
 owa.patch('/me/ui', (req, res) => {
   const cur = JSON.parse(db.prepare('SELECT ui_json FROM users WHERE id = ?').get(req.user.id).ui_json || '{}');
   const b = req.body || {};
   for (const [k, allowed] of Object.entries(UI_KEYS)) if (allowed.includes(b[k])) cur[k] = b[k];
-  for (const k of ['conversations', 'senderImages', 'previewText', 'markReadOnOpen']) if (typeof b[k] === 'boolean') cur[k] = b[k];
+  for (const k of ['conversations', 'senderImages', 'previewText', 'markReadOnOpen', 'folderPane']) if (typeof b[k] === 'boolean') cur[k] = b[k];
   if (Array.isArray(b.favorites)) cur.favorites = b.favorites.map(String).filter((f) => /^(folder:\d+|smart:\w+|category:.{1,40})$/.test(f)).slice(0, 30);
   db.prepare('UPDATE users SET ui_json = ? WHERE id = ?').run(JSON.stringify(cur), req.user.id);
   res.json({ ui: cur });

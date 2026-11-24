@@ -13,6 +13,7 @@ import {
 import * as store from '../mail/store.js';
 import { cleanHtml } from '../mail/html.js';
 import { owa } from './owa.js';
+import { ribbon } from './ribbon.js';
 import { sendMail, deliverRaw, parseRecipients } from '../mail/delivery.js';
 import * as ai from '../ai/index.js';
 import { audit } from '../audit.js';
@@ -148,8 +149,8 @@ api.delete('/folders/:id', wrap(async (req, res) => { store.deleteFolder(req.mbx
 
 // ------------------------------------------------------------ messages
 api.get('/messages', (req, res) => {
-  const { folder, focus, q, offset, limit, flagged, snoozed, category, unread, mentions } = req.query;
-  res.json({ messages: store.listMessages(req.mbx, { folderId: folder, focus, q, offset, limit, flagged: flagged === '1', snoozed: snoozed === '1', category, unread: unread === '1', mentions: mentions === '1' }) });
+  const { folder, focus, q, offset, limit, flagged, snoozed, category, unread, mentions, filter, sort } = req.query;
+  res.json({ messages: store.listMessages(req.mbx, { folderId: folder, focus, q, offset, limit, flagged: flagged === '1', snoozed: snoozed === '1', category, unread: unread === '1', mentions: mentions === '1', filter, sort }) });
 });
 
 api.get('/messages/:id', (req, res) => {
@@ -270,6 +271,7 @@ api.post('/ai/triage', wrap(async (req, res) => {
 }));
 
 api.use(owa);
+api.use(ribbon);
 api.use(features);
 api.use(calendar);
 api.use(admin);

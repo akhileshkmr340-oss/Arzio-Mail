@@ -134,7 +134,7 @@ export function storeMessage(userId, msg) {
 }
 
 const LIST_COLS = `id, folder_id, thread_id, from_addr, from_name, to_json, subject, snippet, date, is_read, is_flagged, is_pinned,
-  is_focused, categories_json, has_attachments, ai_priority, ai_category, ai_needs_reply, snooze_until, spam_score, importance, mentions_me`;
+  is_focused, categories_json, has_attachments, ai_priority, ai_category, ai_needs_reply, snooze_until, spam_score, importance, mentions_me, flag_due_at, flag_completed_at`;
 
 function hydrate(row) {
   if (!row) return row;
@@ -159,7 +159,7 @@ export function recoverableFolder(userId) {
   return f;
 }
 
-export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 0, flagged, snoozed, category, unread, mentions }) {
+export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 0, flagged, snoozed, category, unread, mentions, filter, sort }) {
   const where = ['m.user_id = ?'];
   const args = [userId];
   let from = 'messages m';
@@ -176,13 +176,32 @@ export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 
   if (category) { where.push("m.categories_json LIKE ?"); args.push(`%${JSON.stringify(String(category)).slice(1, -1)}%`); }
   if (unread) where.push('m.is_read = 0');
   if (mentions) where.push('m.mentions_me = 1');
+  // Ribbon "Filter Email" choices
+  if (filter === 'unread') where.push('m.is_read = 0');
+  if (filter === 'flagged') where.push('m.is_flagged = 1');
+  if (filter === 'attachments') where.push('m.has_attachments = 1');
+  if (filter === 'mentions') where.push('m.mentions_me = 1');
+  if (filter === 'important') where.push("m.importance = 'high'");
+  if (filter === 'categorized') where.push("m.categories_json <> '[]'");
+  if (filter === 'tome') {
+    const me = db.prepare('SELECT email FROM users WHERE id = ?').get(userId)?.email || '';
+    where.push('m.to_json LIKE ?'); args.push(`%"${me}"%`);
+  }
+  if (filter === 'week') { where.push('m.date >= ?'); args.push(new Date(Date.now() - 7 * 86400e3).toISOString()); }
   if (focus === 'focused') where.push('m.is_focused = 1');
   if (focus === 'other') where.push('m.is_focused = 0');
   const sql = `SELECT ${LIST_COLS.split(',').map((c) => 'm.' + c.trim()).join(', ')} FROM ${from}
-    WHERE ${where.join(' AND ')} ORDER BY m.is_pinned DESC, m.date DESC LIMIT ? OFFSET ?`;
+    WHERE ${where.join(' AND ')} ORDER BY m.is_pinned DESC, ${SORTS[sort] || 'm.date DESC'} LIMIT ? OFFSET ?`;
   const rows = db.prepare(sql).all(...args, Math.min(Number(limit) || 50, 200), Number(offset) || 0);
   return rows.map(hydrate);
 }
+
+// Ribbon "Sort by" choices
+const SORTS = {
+  'date-asc': 'm.date ASC', from: 'LOWER(m.from_name) ASC, m.date DESC', subject: 'LOWER(m.subject) ASC, m.date DESC',
+  size: 'm.size DESC', importance: "CASE m.importance WHEN 'high' THEN 0 WHEN 'low' THEN 2 ELSE 1 END, m.date DESC",
+  flag: 'm.is_flagged DESC, m.flag_due_at ASC, m.date DESC',
+};
 
 // Turn user input into a safe FTS5 query: each word becomes a quoted prefix term.
 export function ftsQuery(q) {

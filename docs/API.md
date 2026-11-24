@@ -51,11 +51,20 @@ curl -H "Authorization: Bearer $ARZIO_TOKEN" -H "Content-Type: application/json"
 | POST | `/messages/sweep` | move or delete everything from a sender |
 | POST | `/messages/:id/report` | report junk or not junk |
 | GET | `/attachments/:id` | download an attachment |
-| POST | `/send` | `{ to, cc, bcc, subject, text, html, from, attachments[], inReplyTo, sendAt, importance: "high" \| "low", readReceipt, noSignature }`. Pictures in `html` as `data:` URLs go out as inline attachments; `<a data-mention="addr">` marks an @mention |
+| POST | `/send` | `{ to, cc, bcc, subject, text, html, from, attachments[], attachMessages[] (forward as attachment), inReplyTo, sendAt, importance: "high" \| "low", readReceipt, noSignature }`. Pictures in `html` as `data:` URLs go out as inline attachments; `<a data-mention="addr">` marks an @mention |
 | GET | `/messages?mentions=1` | messages that @mention you |
 | POST | `/messages/:id/receipt` | `{ send: true \| false }`: answer a read-receipt request |
 | POST | `/messages/:id/reactions`, `/reactions/lookup` | `{ emoji }` to react (again to remove); `{ ids[] }` to read reactions |
 | POST | `/ai/translate` | `{ messageId, to: "Hindi" }`: translate a message (needs Claude) |
+| GET | `/messages?filter=&sort=` | ribbon filters: `unread`, `attachments`, `tome`, `flagged`, `mentions`, `important`, `categorized`, `week`; sort: `date`, `date-asc`, `from`, `subject`, `size`, `importance`, `flag` |
+| POST | `/messages/:id/ignore` | `{ ignore: true \| false }`: ignore a conversation (it and later replies go to Deleted Items) or stop ignoring |
+| POST | `/messages/:id/cleanup`, `/folders/:id/cleanup` | move messages that a later reply fully quotes to Deleted Items |
+| POST | `/messages/:id/followup` | `{ state: "flagged" \| "complete" \| "clear", due_at }` |
+| GET | `/messages/:id/eml` | download the message as an .eml file |
+| GET, PUT | `/me/quick-steps` | read or replace your Quick Steps (`{ steps[] }` or `{ reset: true }`) |
+| GET, POST, PUT, DELETE | `/contact-lists`, `/contact-lists/:id` | your contact groups `{ name, description, members[] }` |
+| GET | `/groups/directory`, `/address-book?q=` | Browse Groups; the Address Book (contacts, organization, groups) |
+| GET | `/insights` | your week: mail received and sent, follow-ups, meeting hours, top senders |
 | POST | `/drafts` | save a draft |
 | GET, POST | `/outbox`, `/outbox/:id/cancel` | scheduled and queued mail, cancel one |
 

@@ -155,6 +155,10 @@ addColumn('messages', 'importance', 'TEXT');              // high | low | null (
 addColumn('messages', 'receipt_to', 'TEXT');              // sender asked for a read receipt
 addColumn('messages', 'mentions_me', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('users', 'ui_json', "TEXT NOT NULL DEFAULT '{}'");
+// Ribbon: Follow Up dates and Quick Steps
+addColumn('messages', 'flag_due_at', 'TEXT');
+addColumn('messages', 'flag_completed_at', 'TEXT');
+addColumn('users', 'quick_steps_json', 'TEXT');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS contacts (
