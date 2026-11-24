@@ -1,4 +1,4 @@
-# Arzio Mail (Phase 1)
+# Arzio Mail
 
 Arzio Mail is a standalone email service, public and private like Outlook:
 
@@ -7,17 +7,22 @@ Arzio Mail is a standalone email service, public and private like Outlook:
 
 It has built-in AI (Claude by default): thread summaries with action items, reply and new-mail drafting, rewrite (improve, shorten, formal, friendly), and automatic inbox triage that drives the Focused / Other inbox.
 
-## What Phase 1 includes
+## What's included
 
 | Area | Features |
 | --- | --- |
-| Mail | Inbox, Drafts, Sent Items, Archive, Junk, Deleted Items, custom folders; compose, reply, reply all, forward; attachments; conversation threading; read/unread, flag, pin, categories; drag to folder; signatures |
-| Inbox | Focused / Other tabs, AI priority and "needs reply" tags, flagged view, full-text search across subject, body and people |
-| AI | Summarize, draft reply, draft new mail, rewrite, triage. Works without a key using a basic built-in fallback |
-| Delivery | Own inbound SMTP server (MX) for every verified domain; inbound webhooks for Postmark or any relay; outbound through Amazon SES or Postmark SMTP relay; local delivery between Arzio users |
-| Tenants | Public tenant with open signup; private organizations with domains, DNS verification (TXT), user add / disable / reset password / admin role, user limits |
-| Security | scrypt password hashing, HttpOnly session cookies, rate limits on signup, login and AI, per-user daily send limit, mailbox quota, HTML mail rendered in a sandboxed iframe with no scripts, CSP headers |
-| Clients | Responsive web app (desktop and phone browsers); REST API under `/api` for future mobile apps |
+| Mail | Inbox, Drafts, Sent Items, Archive, Junk, Deleted Items, custom folders; compose, reply, reply all, forward; attachments; threading; read/unread, flag, pin, categories; drag to folder; signatures; templates |
+| Inbox | Focused / Other, AI priority and "needs reply" tags, full-text search, snooze, sweep, inbox rules, automatic replies (out of office), safe and blocked senders |
+| Sending | Undo send, scheduled send, send as alias / shared mailbox / on behalf of, contacts autocomplete, retrying delivery queue with bounce notices |
+| Calendar | Day, week and month views; meeting invitations to anyone (iCalendar, works with Outlook and Gmail); accept / tentative / decline; updates and cancellations; recurring events; reminders; scheduling assistant (free/busy for colleagues); .ics import; private subscription link for Google / Apple / Outlook calendars |
+| To Do | Task lists, due dates, reminders, important, flagged email as tasks, "Add to To Do" from any message |
+| People | Contacts with vCard export; suggested recipients from your mail and your organization directory |
+| AI | Summarize, draft and rewrite, triage, writing coach, "Ask Arzio" questions over your mailbox, meeting prep briefs. Claude by default, pluggable; a basic built-in fallback works without a key |
+| AI agents | MCP server at `/mcp` so assistants such as Claude can search and read mail, send, create events and tasks with a personal API token (read-only or read-and-act) |
+| Mail apps | IMAP server and SMTP submission, so Outlook desktop, Apple Mail, Thunderbird and phone mail apps work; app passwords for accounts with two-step verification |
+| Install | Installable web app (PWA) on Windows, Mac, Android and iPhone, with reminders as notifications |
+| Tenants | Public tenant with open signup; private organizations with custom domains, DNS verification, user management, groups, mail flow rules, retention and litigation hold |
+| Security | scrypt passwords, two-step verification (authenticator apps), HttpOnly sessions, rate limits, SPF/DKIM/DMARC checks and spam scoring on inbound mail, sandboxed HTML mail, CSP, audit log |
 
 ## Run it locally
 
@@ -45,6 +50,14 @@ npm run create-admin -- admin 'a-strong-password' "Arzio Admin"
 ```
 
 Run the tests: `npm test`.
+
+### Connecting a mail app
+
+In development IMAP listens on port 1143 and SMTP submission on 1587 without TLS. In production set `IMAP_PORT=993 IMAP_TLS=true`, `SUBMISSION_PORT=465 SUBMISSION_TLS=true` and `MAIL_TLS_KEY/MAIL_TLS_CERT` for `mail.arzio.com`. Users see the exact settings in **Settings > Mail apps & AI agents**, where they can also create app passwords.
+
+### Connecting an AI assistant (MCP)
+
+Create a token in **Settings > Mail apps & AI agents**, then add `https://mail.arzio.com/mcp` as a remote MCP server with the header `Authorization: Bearer <token>`. Tools: `list_folders`, `search_mail`, `read_message`, `list_events`, `list_tasks`, and with a read-and-act token `send_mail`, `create_event`, `create_task`, `complete_task`.
 
 ## Production setup (SES/Postmark out, own inbound)
 
@@ -80,11 +93,11 @@ scripts/create-admin.js
 test/api.test.js
 ```
 
-## Known limits of Phase 1 (planned next)
+## Known limits
 
-- SQLite on one server: fine for early users; move to PostgreSQL and object storage before large scale (Phase 5).
-- No spam or virus filtering yet on inbound mail (Phase 2: Rspamd and ClamAV, SPF/DKIM/DMARC checks).
-- No outbound retry queue or bounce handling yet (Phase 2).
-- No IMAP or SMTP submission yet, so desktop apps such as Outlook or Thunderbird cannot connect (Phase 3).
-- No calendar, contacts or tasks yet (Phases 2 and 3). No MFA yet (Phase 2).
+- SQLite on one server: fine for early users; move to PostgreSQL and object storage before large scale.
+- Virus scanning of attachments is not built in; add ClamAV at the MX for production.
+- Native iOS and Android apps are not included. Phones use the installable web app, or their built-in mail app over IMAP.
+- Exchange ActiveSync and EWS are not supported; Outlook desktop connects over IMAP.
+- Online meetings: events take a meeting link (Teams, Zoom, Meet, Jitsi), but Arzio has no video service of its own.
 - The Claude integration was tested up to the API call; run one summary with a real `ANTHROPIC_API_KEY` to confirm end to end.

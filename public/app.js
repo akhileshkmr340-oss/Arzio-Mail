@@ -108,6 +108,11 @@ async function startApp() {
   await loadFolders();
   loadMailboxes();
   if (!state.folderId) selectFolder(state.folders.find((f) => f.role === 'inbox').id);
+  pollNotifications();
+  // App shortcuts (installed app) and links: ?compose=1, ?view=calendar|tasks|people
+  const qp = new URLSearchParams(location.search);
+  if (qp.get('compose')) openComposer('new');
+  if (VIEWS[qp.get('view')]) showView(qp.get('view'));
 }
 
 async function boot() {
@@ -119,6 +124,8 @@ async function boot() {
   $('#ai-badge').textContent = ai.provider === 'anthropic' ? '✨ AI: Claude' : '✨ AI: basic';
   try { await startApp(); } catch { showAuth(); }
   setInterval(() => { if (state.me && !document.hidden) refresh(true); }, 30000);
+  setInterval(() => { if (state.me) pollNotifications(); }, 20000);
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
 // ------------------------------------------------------------ folders
@@ -342,6 +349,7 @@ function renderReader(message, thread) {
       ${(message.categories || []).map((c) => `<span class="tag cat">${esc(c)}</span>`).join('')}
       ${thread.length > 1 ? `<span class="muted small">${thread.length} messages in this conversation</span>` : ''}
     </div>
+    ${inviteCard(message)}
     <div id="ai-out">${message.ai_summary ? aiCard({ summary: message.ai_summary, actionItems: [] }, true) : ''}</div>
     ${thread.map((m) => mailItem(m, m.id === message.id || thread.length === 1 || m === thread[thread.length - 1])).join('')}`;
   showPane('reader');
@@ -407,6 +415,15 @@ function afterRemove() {
 
 async function readerAction(act, message, thread, btn) {
   try {
+    if (act.startsWith('rsvp:')) {
+      const status = act.slice(5);
+      await api(`/calendar/events/${message.calendar.eventId}/respond`, { method: 'POST', body: { status } });
+      toast({ accepted: 'Accepted. The organizer has been told.', tentative: 'Tentatively accepted.', declined: 'Declined. The organizer has been told.' }[status]);
+      message.calendar.response = status;
+      renderReader(message, thread);
+      return;
+    }
+    if (act === 'open-calendar') { showView('calendar', { date: message.calendar.start_at }); return; }
     switch (act) {
       case 'back': closeReader(); break;
       case 'reply': case 'replyall': case 'forward': openComposer(act, message); break;
@@ -478,6 +495,9 @@ async function readerAction(act, message, thread, btn) {
             toast(`Deleted ${r.moved} message(s).`); refresh(); closeReader();
           }],
           ['Create rule from this message', () => openSettings('rules', { from: message.from_addr, subject: message.subject })],
+          ['Add to To Do', async () => {
+            await api('/tasks', { method: 'POST', body: { title: message.subject || '(no subject)', notes: `From ${message.from_name || message.from_addr}`, message_id: message.id } }); toast('Added to To Do.');
+          }],
           ['Add sender to contacts', async () => {
             await api('/contacts', { method: 'POST', body: { email: message.from_addr, name: message.from_name } }); toast('Added to contacts.');
           }],
@@ -844,7 +864,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 // ------------------------------------------------------------ settings (tabbed)
 const SETTINGS_TABS = [
   ['general', 'General'], ['ooo', 'Automatic replies'], ['rules', 'Rules'], ['junk', 'Junk email'],
-  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'],
+  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Mail apps & AI agents'],
 ];
 
 async function openSettings(tab = 'general', ruleSeed = null) {
@@ -1008,6 +1028,44 @@ async function openSettings(tab = 'general', ruleSeed = null) {
     if (off) off.onsubmit = async (e) => { e.preventDefault(); try { await api('/me/mfa/disable', { method: 'POST', body: { password: e.target.password.value } }); toast('Two-step verification is off.'); openSettings('security'); } catch (ex) { err.textContent = ex.message; } };
     $('#pw-form', body).onsubmit = async (e) => { e.preventDefault(); try { await api('/me', { method: 'PATCH', body: { currentPassword: e.target.currentPassword.value, newPassword: e.target.newPassword.value } }); toast('Password changed.'); e.target.reset(); } catch (ex) { err.textContent = ex.message; } };
   }
+
+  if (tab === 'apps') {
+    const [{ appPasswords, servers }, { tokens }, feed] = await Promise.all([api('/me/app-passwords'), api('/me/tokens'), api('/calendar/feed')]);
+    const when = (d) => (d ? fmtDate(`${d.replace(' ', 'T')}Z`, true) : 'never');
+    body.innerHTML = `<h3>Outlook, Apple Mail, Thunderbird and phone mail apps</h3>
+      <p class="muted">Add your account as an <strong>IMAP</strong> account with these settings.${u.totp_enabled ? ' Because two-step verification is on, sign in with an app password below instead of your normal password.' : ' You can sign in with your normal password, or create an app password for each device.'}</p>
+      <table class="kv"><tr><th>Username</th><td><code>${esc(servers.username)}</code></td></tr>
+      <tr><th>Incoming (IMAP)</th><td><code>${esc(servers.imap.host)}</code> port <code>${servers.imap.port}</code>, ${esc(servers.imap.security)}</td></tr>
+      <tr><th>Outgoing (SMTP)</th><td><code>${esc(servers.smtp.host)}</code> port <code>${servers.smtp.port}</code>, ${esc(servers.smtp.security)}, sign-in required</td></tr></table>
+      <h3>App passwords</h3>
+      <table>${appPasswords.map((a) => `<tr><td>${esc(a.name)}</td><td class="muted small">created ${when(a.created_at)}, last used ${when(a.last_used)}</td><td><button class="link-btn" data-del-ap="${a.id}">Remove</button></td></tr>`).join('') || '<tr><td class="muted">None yet.</td></tr>'}</table>
+      <form id="ap-form" class="row"><label>Device name<input name="name" placeholder="e.g. iPhone Mail" required></label><button class="btn">Create app password</button></form>
+      <div id="ap-out"></div>
+      <h3>AI agents and API access</h3>
+      <p class="muted">Let an AI assistant (Claude, ChatGPT, Copilot or any MCP client) work with your mail, calendar and To Do. Add this MCP server URL in the assistant and paste a token. Read-only tokens can search and read; "read and act" tokens can also send mail, create events and tasks.</p>
+      <p>MCP server: <code>${esc(location.origin)}/mcp</code></p>
+      <table>${tokens.map((t) => `<tr><td>${esc(t.name)}</td><td>${t.scopes === 'read' ? 'Read only' : 'Read and act'}</td><td class="muted small">last used ${when(t.last_used)}</td><td><button class="link-btn" data-del-tok="${t.id}">Revoke</button></td></tr>`).join('') || '<tr><td class="muted">No tokens yet.</td></tr>'}</table>
+      <form id="tok-form" class="row"><label>Name<input name="name" placeholder="e.g. Claude" required></label><label>Access<select name="scopes"><option value="read">Read only</option><option value="read,send">Read and act</option></select></label><button class="btn">Create token</button></form>
+      <div id="tok-out"></div>
+      <h3>Calendar subscription</h3>
+      <p class="muted">Show your Arzio calendar in Google Calendar, Apple Calendar or Outlook with a private link. Anyone with the link can see your events.</p>
+      ${feed.url ? `<p><code class="wrap">${esc(feed.url)}</code></p><button class="btn" id="feed-reset">New link</button> <button class="btn danger" id="feed-off">Turn off</button>` : '<button class="btn" id="feed-reset">Create link</button>'}
+      <p class="form-error"></p>`;
+    const err = $('.form-error', body);
+    const secret = (label, value, note) => `<div class="secret"><p><strong>${label}</strong> ${note}</p><code>${esc(value)}</code></div>`;
+    $('#ap-form', body).onsubmit = async (e) => { e.preventDefault(); try { const r = await api('/me/app-passwords', { method: 'POST', body: { name: e.target.name.value } }); await openSettings('apps'); $('#ap-out').innerHTML = secret('Your app password:', r.password, 'Enter it in the mail app instead of your password. It is shown only once.'); } catch (ex) { err.textContent = ex.message; } };
+    $('#tok-form', body).onsubmit = async (e) => { e.preventDefault(); try { const r = await api('/me/tokens', { method: 'POST', body: { name: e.target.name.value, scopes: e.target.scopes.value } }); await openSettings('apps'); $('#tok-out').innerHTML = secret('Your token:', r.token, 'Paste it into the assistant as a Bearer token. It is shown only once.'); } catch (ex) { err.textContent = ex.message; } };
+    body.onclick = async (e) => {
+      const ap = e.target.closest('[data-del-ap]');
+      const tok = e.target.closest('[data-del-tok]');
+      try {
+        if (ap) { await api(`/me/app-passwords/${ap.dataset.delAp}`, { method: 'DELETE' }); openSettings('apps'); }
+        if (tok) { await api(`/me/tokens/${tok.dataset.delTok}`, { method: 'DELETE' }); openSettings('apps'); }
+        if (e.target.id === 'feed-reset') { await api('/calendar/feed', { method: 'POST', body: {} }); openSettings('apps'); }
+        if (e.target.id === 'feed-off') { await api('/calendar/feed', { method: 'POST', body: { enabled: false } }); openSettings('apps'); }
+      } catch (ex) { err.textContent = ex.message; }
+    };
+  }
 }
 
 // ------------------------------------------------------------ Ask Arzio (questions over your mailbox)
@@ -1055,18 +1113,19 @@ function showMailView() {
   $('#full-pane').classList.add('hidden');
   $$('[data-view]').forEach((b) => b.classList.remove('active'));
 }
-async function showView(name) {
+async function showView(name, opts = {}) {
   state.view = name;
   $('.layout').classList.add('full');
   $('#full-pane').classList.remove('hidden');
   $$('[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   $$('#folder-list button, [data-smart]').forEach((b) => b.classList.remove('active'));
   $('#sidebar').classList.remove('open');
-  try { await VIEWS[name]($('#full-pane')); } catch (ex) { toast(ex.message); }
+  try { await VIEWS[name]($('#full-pane'), opts); } catch (ex) { toast(ex.message); }
 }
 $$('[data-view]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
 
 VIEWS.people = async (pane, q = '') => {
+  if (typeof q !== 'string') q = '';
   const { contacts } = await api(`/contacts?q=${encodeURIComponent(q)}`);
   pane.innerHTML = `<div class="row" style="justify-content:space-between;align-items:center"><h2>People</h2>
       <div><a class="btn" href="/api/contacts.vcf" download>Export vCard</a> <button class="btn primary" id="new-contact">New contact</button></div></div>
@@ -1178,6 +1237,373 @@ async function openServiceAdmin() {
 }
 
 // Keyboard shortcuts (Outlook-style)
+// ------------------------------------------------------------ meeting invites in the reader
+const fmtWhen = (start, end, allDay) => {
+  const s = new Date(start);
+  const e = new Date(end);
+  const day = s.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  if (allDay) return `${day} (all day)`;
+  const t = (d) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return `${day}, ${t(s)} – ${t(e)}`;
+};
+
+function inviteCard(m) {
+  const c = m.calendar;
+  if (!c) return '';
+  if (c.method === 'REPLY') {
+    const verb = { accepted: 'accepted', tentative: 'tentatively accepted', declined: 'declined' }[c.status] || 'responded to';
+    return `<div class="invite"><div class="invite-icon">\u{1F4C5}</div><div><strong>${esc(c.attendee)} ${verb}</strong> ${esc(c.title || '')}</div></div>`;
+  }
+  if (c.method === 'CANCEL') {
+    return `<div class="invite cancelled"><div class="invite-icon">\u{1F4C5}</div><div><strong>Canceled:</strong> ${esc(c.title || '')}<div class="muted small">${c.start_at ? esc(fmtWhen(c.start_at, c.start_at)) : ''}</div></div></div>`;
+  }
+  const resp = c.response;
+  const answered = ['accepted', 'tentative', 'declined'].includes(resp);
+  return `<div class="invite"><div class="invite-icon">\u{1F4C5}</div><div class="invite-body">
+    <strong>${esc(c.title || '(no title)')}</strong>
+    <div>${esc(fmtWhen(c.start_at, c.end_at))}</div>
+    ${c.location ? `<div class="muted">${esc(c.location)}</div>` : ''}
+    <div class="muted small">Organizer: ${esc(c.organizer || '')}</div>
+    ${c.removed ? '<div class="muted">This event is no longer on your calendar.</div>' : `<div class="invite-actions">
+      ${answered ? `<span class="tag">${{ accepted: '✔ Accepted', tentative: '? Tentative', declined: '✖ Declined' }[resp]}</span>` : ''}
+      <button class="btn ${resp === 'accepted' ? 'primary' : ''}" data-act="rsvp:accepted">✔ Accept</button>
+      <button class="btn" data-act="rsvp:tentative">? Tentative</button>
+      <button class="btn" data-act="rsvp:declined">✖ Decline</button>
+      <button class="link-btn" data-act="open-calendar">Show in calendar</button></div>`}
+  </div></div>`;
+}
+
+// ------------------------------------------------------------ notifications (event and task reminders)
+const seenNotifications = new Set();
+async function pollNotifications() {
+  try {
+    const { notifications } = await api('/notifications?unread=1');
+    const btn = $('#bell-btn');
+    btn.dataset.count = notifications.length || '';
+    btn.classList.toggle('has', notifications.length > 0);
+    for (const n of notifications) {
+      if (seenNotifications.has(n.id)) continue;
+      seenNotifications.add(n.id);
+      if (seenNotifications.size === 1 && notifications.length > 3) continue; // first load: don't flood
+      toast(`\u{1F514} ${n.title}${n.body ? ` · ${n.body.replace(/Starts (\S+)/, (_, d) => `Starts ${new Date(d).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`)}` : ''}`);
+      if (window.Notification?.permission === 'granted' && document.hidden) new Notification(n.title, { body: n.body, tag: `arzio-${n.id}` });
+    }
+  } catch { /* offline or signed out */ }
+}
+$('#bell-btn').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
+  const { notifications } = await api('/notifications');
+  const items = notifications.slice(0, 10).map((n) => [`${n.is_read ? '' : '● '}${n.title}${n.body ? ` — ${n.body.replace(/Starts (\S+)/, (_, d) => `starts ${new Date(d).toLocaleString()}`)}` : ''}`, () => {
+    if (n.link.eventId) showView('calendar', { date: n.link.start });
+    else if (n.link.taskId) showView('tasks');
+  }]);
+  popMenu(e.currentTarget, items.length ? items : [['No reminders yet', () => {}]]);
+  await api('/notifications/read', { method: 'POST', body: {} });
+  pollNotifications();
+});
+
+// ------------------------------------------------------------ Calendar
+const cal = { view: 'week', date: new Date() };
+const HOUR_PX = 44;
+const dayStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const toLocalInput = (d) => { const x = new Date(d); return new Date(x.getTime() - x.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
+const timeLabel = (d) => new Date(d).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+const STATUS_CLASS = { 'needs-action': 'pending', tentative: 'tentative', declined: 'declined' };
+
+function calRange() {
+  if (cal.view === 'day') { const s = dayStart(cal.date); return [s, addDays(s, 1)]; }
+  if (cal.view === 'week') { const s = addDays(dayStart(cal.date), -dayStart(cal.date).getDay()); return [s, addDays(s, 7)]; }
+  const first = new Date(cal.date.getFullYear(), cal.date.getMonth(), 1);
+  const s = addDays(first, -first.getDay());
+  return [s, addDays(s, 42)];
+}
+
+VIEWS.calendar = async (pane, opts = {}) => {
+  if (opts.date) cal.date = new Date(opts.date);
+  if (window.innerWidth < 760 && cal.view === 'week') cal.view = 'day';
+  const [from, to] = calRange();
+  const { events } = await api(`/calendar/events?from=${from.toISOString()}&to=${to.toISOString()}`);
+  const title = cal.view === 'month' ? cal.date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+    : cal.view === 'day' ? cal.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+      : `${from.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${addDays(to, -1).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+  pane.innerHTML = `<div class="cal-head">
+      <button class="btn primary" data-cal="new">+ New event</button>
+      <button class="btn" data-cal="today">Today</button>
+      <button class="icon-btn" data-cal="prev" aria-label="Previous">‹</button><button class="icon-btn" data-cal="next" aria-label="Next">›</button>
+      <h2>${esc(title)}</h2>
+      <span class="grow"></span>
+      <div class="seg">${['day', 'week', 'month'].map((v) => `<button data-calview="${v}" class="${cal.view === v ? 'active' : ''}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
+      <label class="btn" title="Import an .ics file">Import<input type="file" accept=".ics,text/calendar" hidden id="ics-file"></label>
+    </div>
+    <div class="cal-body">${cal.view === 'month' ? monthGrid(from, events) : timeGrid(from, cal.view === 'day' ? 1 : 7, events)}</div>`;
+  const body = $('.cal-body', pane);
+  if (cal.view !== 'month') body.scrollTop = HOUR_PX * 7.5;
+  const nav = (n) => {
+    if (cal.view === 'month') cal.date = new Date(cal.date.getFullYear(), cal.date.getMonth() + n, 1);
+    else cal.date = addDays(cal.date, n * (cal.view === 'day' ? 1 : 7));
+    VIEWS.calendar(pane);
+  };
+  pane.onclick = (e) => {
+    const b = e.target.closest('[data-cal], [data-calview], [data-ev], [data-slot], [data-day]');
+    if (!b) return;
+    if (b.dataset.cal === 'new') editEvent({}, pane);
+    if (b.dataset.cal === 'today') { cal.date = new Date(); VIEWS.calendar(pane); }
+    if (b.dataset.cal === 'prev') nav(-1);
+    if (b.dataset.cal === 'next') nav(1);
+    if (b.dataset.calview) { cal.view = b.dataset.calview; VIEWS.calendar(pane); }
+    if (b.dataset.ev) { e.stopPropagation(); showEvent(Number(b.dataset.ev), pane); return; }
+    if (b.dataset.slot) { const s = new Date(b.dataset.slot); editEvent({ start_at: s.toISOString(), end_at: new Date(s.getTime() + 3600e3).toISOString() }, pane); }
+    if (b.dataset.day) { cal.date = new Date(b.dataset.day); cal.view = 'day'; VIEWS.calendar(pane); }
+  };
+  $('#ics-file', pane).onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try { const r = await api('/calendar/import', { method: 'POST', body: { ics: await f.text() } }); toast(`Imported ${r.imported} event(s).`); VIEWS.calendar(pane); } catch (ex) { toast(ex.message); }
+  };
+};
+
+function evChip(e, extraStyle = '') {
+  const cls = ['ev', STATUS_CLASS[e.my_status] || '', e.show_as === 'free' ? 'free' : ''].join(' ');
+  return `<div class="${cls}" data-ev="${e.id}" style="${extraStyle}${e.color ? `--ev:${esc(e.color)};` : ''}" title="${esc(e.title)}">
+    <strong>${esc(e.title || '(no title)')}</strong>${e.all_day ? '' : ` <span>${timeLabel(e.start_at)}</span>`}${e.location ? `<div class="small">${esc(e.location)}</div>` : ''}</div>`;
+}
+
+function timeGrid(from, days, events) {
+  const cols = [...Array(days)].map((_, i) => addDays(from, i));
+  const today = dayStart(new Date()).getTime();
+  const head = cols.map((d) => `<div class="cal-dayhead ${dayStart(d).getTime() === today ? 'today' : ''}" data-day="${d.toISOString()}">${d.toLocaleDateString(undefined, { weekday: 'short' })} <b>${d.getDate()}</b></div>`).join('');
+  const allDay = cols.map((d) => {
+    const list = events.filter((e) => e.all_day && new Date(e.start_at) < addDays(d, 1) && new Date(e.end_at) > d);
+    return `<div class="cal-allday-cell">${list.map((e) => evChip(e)).join('')}</div>`;
+  }).join('');
+  const hours = [...Array(24)].map((_, h) => `<div class="cal-hour">${h ? new Date(2000, 0, 1, h).toLocaleTimeString(undefined, { hour: 'numeric' }) : ''}</div>`).join('');
+  const colHtml = cols.map((d) => {
+    const dayEnd = addDays(d, 1);
+    const list = events.filter((e) => !e.all_day && new Date(e.start_at) < dayEnd && new Date(e.end_at) > d)
+      .sort((a, b) => a.start_at.localeCompare(b.start_at));
+    // simple overlap layout: place each event in the first free lane
+    const lanes = [];
+    const placed = list.map((e) => {
+      const s = Math.max(new Date(e.start_at), d);
+      const en = Math.min(new Date(e.end_at), dayEnd);
+      let lane = lanes.findIndex((end) => end <= s);
+      if (lane < 0) { lane = lanes.length; lanes.push(en); } else lanes[lane] = en;
+      return { e, s, en, lane };
+    });
+    const n = Math.max(1, lanes.length);
+    const slots = [...Array(48)].map((_, i) => `<div class="cal-slot" data-slot="${new Date(d.getTime() + i * 1800e3).toISOString()}"></div>`).join('');
+    const evs = placed.map(({ e, s, en, lane }) => {
+      const top = ((s - d) / 3600e3) * HOUR_PX;
+      const h = Math.max(20, ((en - s) / 3600e3) * HOUR_PX - 2);
+      return evChip(e, `position:absolute;top:${top}px;height:${h}px;left:${(lane / n) * 100}%;width:calc(${100 / n}% - 4px);`);
+    }).join('');
+    const nowLine = dayStart(d).getTime() === today ? `<div class="now-line" style="top:${((Date.now() - d) / 3600e3) * HOUR_PX}px"></div>` : '';
+    return `<div class="cal-col">${slots}${evs}${nowLine}</div>`;
+  }).join('');
+  return `<div class="cal-grid" style="--days:${days}">
+    <div></div>${head}
+    <div class="cal-allday-label small muted">All day</div>${allDay}
+    <div class="cal-hours">${hours}</div>${colHtml}</div>`;
+}
+
+function monthGrid(from, events) {
+  const month = cal.date.getMonth();
+  const today = dayStart(new Date()).getTime();
+  const names = [...Array(7)].map((_, i) => `<div class="cal-dayhead">${addDays(from, i).toLocaleDateString(undefined, { weekday: 'short' })}</div>`).join('');
+  const cells = [...Array(42)].map((_, i) => {
+    const d = addDays(from, i);
+    const list = events.filter((e) => new Date(e.start_at) < addDays(d, 1) && new Date(e.end_at) > d);
+    const more = list.length > 3 ? `<div class="small muted">+${list.length - 3} more</div>` : '';
+    return `<div class="cal-cell ${d.getMonth() !== month ? 'other' : ''} ${d.getTime() === today ? 'today' : ''}" data-slot="${new Date(d.getTime() + 9 * 3600e3).toISOString()}">
+      <div class="cal-date" data-day="${d.toISOString()}">${d.getDate()}</div>${list.slice(0, 3).map((e) => evChip(e)).join('')}${more}</div>`;
+  }).join('');
+  return `<div class="cal-month">${names}${cells}</div>`;
+}
+
+async function showEvent(id, pane) {
+  const { event: e } = await api(`/calendar/events/${id}`);
+  const org = e.my_status === 'organizer';
+  const statusIcon = { accepted: '✔', tentative: '?', declined: '✖', 'needs-action': '…' };
+  const m = modal(`<h2>${esc(e.title || '(no title)')}</h2>
+    <p>${esc(fmtWhen(e.start_at, e.end_at, e.all_day))}${e.recurrence !== 'none' ? ` · repeats ${esc(e.recurrence)}` : ''}</p>
+    ${e.location ? `<p>\u{1F4CD} ${esc(e.location)}</p>` : ''}
+    ${e.online_url ? `<p>\u{1F517} <a href="${esc(e.online_url)}" target="_blank" rel="noopener noreferrer">Join online</a></p>` : ''}
+    ${e.description ? `<p class="pre">${esc(e.description)}</p>` : ''}
+    <p class="muted small">Organizer: ${esc(org ? 'You' : e.organizer_name || e.organizer_email)}</p>
+    ${e.attendees.length ? `<ul class="attendees">${e.attendees.map((a) => `<li title="${esc(a.status)}">${statusIcon[a.status] || '…'} ${esc(a.name || a.email)}</li>`).join('')}</ul>` : ''}
+    <div id="brief-out"></div>
+    <p class="form-error"></p>
+    <div class="actions">
+      ${state.me.ai_enabled ? '<button class="btn ai" data-e="brief">✨ Prepare me</button>' : ''}
+      <span class="grow"></span>
+      ${org ? '<button class="btn" data-e="edit">Edit</button>' : `<button class="btn" data-e="accepted">Accept</button><button class="btn" data-e="tentative">Tentative</button><button class="btn" data-e="declined">Decline</button>`}
+      <button class="btn danger" data-e="delete">${org && e.attendees.length ? 'Cancel meeting' : 'Delete'}</button>
+      <button class="btn" data-close>Close</button>
+    </div>`);
+  m.onclick = async (ev) => {
+    const b = ev.target.closest('[data-e]');
+    if (!b) return;
+    const err = $('.form-error', m);
+    try {
+      if (b.dataset.e === 'edit') { closeModal(); editEvent(e, pane); }
+      if (['accepted', 'tentative', 'declined'].includes(b.dataset.e)) { await api(`/calendar/events/${e.id}/respond`, { method: 'POST', body: { status: b.dataset.e } }); closeModal(); toast('Response sent.'); VIEWS.calendar(pane); }
+      if (b.dataset.e === 'delete') {
+        if (!confirm(org && e.attendees.length ? 'Cancel this meeting and tell the attendees?' : 'Delete this event?')) return;
+        await api(`/calendar/events/${e.id}`, { method: 'DELETE' }); closeModal(); VIEWS.calendar(pane);
+      }
+      if (b.dataset.e === 'brief') {
+        busy(b, true, 'Preparing…');
+        const r = await api(`/calendar/events/${e.id}/brief`, { method: 'POST', body: {} });
+        $('#brief-out', m).innerHTML = `<div class="ai-card"><p>${esc(r.brief)}</p>${r.openQuestions?.length ? `<p><strong>Open questions</strong></p><ul>${r.openQuestions.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+          ${r.sources.length ? `<p class="small muted">Based on: ${r.sources.map((s) => esc(s.subject)).join(' · ')}</p>` : ''}</div>`;
+        busy(b, false);
+      }
+    } catch (ex) { busy(b, false); err.textContent = ex.message; }
+  };
+}
+
+function editEvent(e, pane) {
+  const start = e.start_at ? new Date(e.start_at) : (() => { const d = new Date(); d.setMinutes(d.getMinutes() < 30 ? 30 : 60, 0, 0); return d; })();
+  const end = e.end_at ? new Date(e.end_at) : new Date(start.getTime() + 3600e3);
+  const reminders = [[null, 'None'], [0, 'At start'], [5, '5 minutes before'], [15, '15 minutes before'], [30, '30 minutes before'], [60, '1 hour before'], [1440, '1 day before']];
+  const m = modal(`<h2>${e.id ? 'Edit event' : 'New event'}</h2><form id="ev-form">
+    <label>Title<input name="title" value="${esc(e.title || '')}" required></label>
+    <label>Invite attendees<input name="attendees" value="${esc((e.attendees || []).map((a) => a.email).join(', '))}" placeholder="name@example.com, …"></label>
+    <div class="row"><label>Start<input type="datetime-local" name="start" value="${toLocalInput(start)}" required></label><label>End<input type="datetime-local" name="end" value="${toLocalInput(end)}" required></label></div>
+    <label class="check"><input type="checkbox" name="all_day" ${e.all_day ? 'checked' : ''}> All day</label>
+    <button type="button" class="link-btn" id="sched-btn">Scheduling assistant: see when people are free</button>
+    <div id="sched-out"></div>
+    <div class="row"><label>Location<input name="location" value="${esc(e.location || '')}"></label><label>Online meeting link<input name="online_url" value="${esc(e.online_url || '')}" placeholder="https://…"></label></div>
+    <div class="row">
+      <label>Repeat<select name="recurrence">${['none', 'daily', 'weekly', 'monthly', 'yearly'].map((r) => `<option value="${r}" ${(e.recurrence || 'none') === r ? 'selected' : ''}>${r === 'none' ? 'Does not repeat' : r[0].toUpperCase() + r.slice(1)}</option>`).join('')}</select></label>
+      <label>Until<input type="date" name="recur_until" value="${e.recur_until ? e.recur_until.slice(0, 10) : ''}"></label>
+      <label>Reminder<select name="reminder_minutes">${reminders.map(([v, l]) => `<option value="${v ?? ''}" ${(e.id ? e.reminder_minutes : 15) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Show as<select name="show_as">${['busy', 'tentative', 'free', 'oof'].map((v) => `<option value="${v}" ${(e.show_as || 'busy') === v ? 'selected' : ''}>${{ busy: 'Busy', tentative: 'Tentative', free: 'Free', oof: 'Away' }[v]}</option>`).join('')}</select></label>
+    </div>
+    <label>Description<textarea name="description" rows="4">${esc(e.description || '')}</textarea></label>
+    <p class="form-error"></p>
+    <div class="actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary">${e.id ? 'Save' : (e.attendees?.length ? 'Send' : 'Save')}</button></div></form>`);
+  const f = $('#ev-form', m);
+  const attendeesInput = f.attendees;
+  attachAutocomplete(attendeesInput);
+  f.attendees.oninput = () => { $('.btn.primary', f).textContent = e.id ? (attendeesInput.value.trim() ? 'Send update' : 'Save') : (attendeesInput.value.trim() ? 'Send' : 'Save'); };
+  f.attendees.oninput();
+  $('#sched-btn', f).onclick = async () => {
+    const day = dayStart(new Date(f.start.value));
+    const emails = f.attendees.value.split(/[,;]+/).map((x) => (x.match(/<([^>]+)>/)?.[1] || x).trim()).filter(Boolean);
+    const { busy: bz } = await api('/calendar/freebusy', { method: 'POST', body: { emails, from: day.toISOString(), to: addDays(day, 1).toISOString() } });
+    const pct = (d) => Math.max(0, Math.min(100, ((new Date(d) - day) / 86400e3) * 100));
+    const sel = [pct(new Date(f.start.value)), pct(new Date(f.end.value))];
+    $('#sched-out', f).innerHTML = `<div class="sched">${Object.entries(bz).map(([who, list]) => `<div class="sched-row"><span class="sched-name">${who === state.me.email ? 'You' : esc(who)}</span><div class="sched-bar">
+      <div class="sched-sel" style="left:${sel[0]}%;width:${sel[1] - sel[0]}%"></div>
+      ${list === null ? '<span class="small muted" style="padding-left:6px">Availability not shared</span>' : list.map((b) => `<div class="sched-busy ${b.status}" style="left:${pct(b.start)}%;width:${pct(b.end) - pct(b.start)}%" title="${timeLabel(b.start)} – ${timeLabel(b.end)}"></div>`).join('')}
+      </div></div>`).join('')}<div class="sched-row"><span class="sched-name"></span><div class="sched-scale small muted"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span></span></div></div></div>`;
+  };
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const allDay = f.all_day.checked;
+    let s = new Date(f.start.value);
+    let en = new Date(f.end.value);
+    if (allDay) { s = new Date(Date.UTC(s.getFullYear(), s.getMonth(), s.getDate())); en = new Date(Date.UTC(en.getFullYear(), en.getMonth(), en.getDate()) + 86400e3); }
+    const body = {
+      title: f.title.value, start_at: s.toISOString(), end_at: en.toISOString(), all_day: allDay,
+      attendees: f.attendees.value.split(/[,;]+/).map((x) => (x.match(/<([^>]+)>/)?.[1] || x).trim()).filter(Boolean),
+      location: f.location.value, online_url: f.online_url.value, recurrence: f.recurrence.value,
+      recur_until: f.recur_until.value ? new Date(`${f.recur_until.value}T23:59:59`).toISOString() : null,
+      reminder_minutes: f.reminder_minutes.value === '' ? null : Number(f.reminder_minutes.value), show_as: f.show_as.value, description: f.description.value,
+    };
+    try {
+      await api(e.id ? `/calendar/events/${e.id}` : '/calendar/events', { method: e.id ? 'PUT' : 'POST', body });
+      closeModal();
+      toast(body.attendees.length ? 'Invitations sent.' : 'Saved.');
+      cal.date = s;
+      if (state.view === 'calendar') VIEWS.calendar(pane);
+    } catch (ex) { $('.form-error', f).textContent = ex.message; }
+  };
+}
+
+// ------------------------------------------------------------ To Do
+const todo = { list: 'Tasks' };
+VIEWS.tasks = async (pane) => {
+  const { tasks, lists, flagged } = await api('/tasks');
+  const listNames = [...new Set(['Tasks', ...lists.map((l) => l.name)])];
+  const openCount = (n) => lists.find((l) => l.name === n)?.open || 0;
+  const shown = todo.list === '__important' ? tasks.filter((t) => t.important) : todo.list === '__flagged' ? [] : tasks.filter((t) => t.list_name === todo.list);
+  const due = (t) => (t.due_at ? `<span class="small ${!t.completed && new Date(t.due_at) < dayStart(new Date()) ? 'overdue' : 'muted'}">Due ${new Date(t.due_at).toLocaleDateString()}</span>` : '');
+  const row = (t) => `<li class="task ${t.completed ? 'done' : ''}" data-task="${t.id}">
+      <input type="checkbox" data-t="toggle" ${t.completed ? 'checked' : ''} aria-label="Complete">
+      <div class="task-main" data-t="edit"><div>${esc(t.title)}</div><div>${due(t)}${t.reminder_at && !t.completed ? ` <span class="small muted">\u{1F514} ${new Date(t.reminder_at).toLocaleString()}</span>` : ''}${t.message_id ? ' <span class="small muted">\u{2709} from email</span>' : ''}${todo.list === '__important' ? ` <span class="small muted">${esc(t.list_name)}</span>` : ''}</div></div>
+      <button class="icon-btn star ${t.important ? 'on' : ''}" data-t="star" aria-label="Important">${t.important ? '★' : '☆'}</button></li>`;
+  const open = shown.filter((t) => !t.completed);
+  const done = shown.filter((t) => t.completed);
+  pane.innerHTML = `<div class="todo">
+    <aside class="todo-lists">
+      <button data-list="__important" class="${todo.list === '__important' ? 'active' : ''}">★ Important <span>${tasks.filter((t) => t.important && !t.completed).length || ''}</span></button>
+      <button data-list="__flagged" class="${todo.list === '__flagged' ? 'active' : ''}">⚑ Flagged email <span>${flagged.length || ''}</span></button>
+      <hr>
+      ${listNames.map((n) => `<button data-list="${esc(n)}" class="${todo.list === n ? 'active' : ''}">☰ ${esc(n)} <span>${openCount(n) || ''}</span></button>`).join('')}
+      <button class="link-btn" data-t="newlist">+ New list</button>
+    </aside>
+    <section class="todo-main">
+      <h2>${esc(todo.list === '__important' ? 'Important' : todo.list === '__flagged' ? 'Flagged email' : todo.list)}</h2>
+      ${todo.list === '__flagged' ? `<ul class="tasks">${flagged.map((m) => `<li class="task" data-mail="${m.id}"><span>⚑</span><div class="task-main"><div>${esc(m.subject || '(no subject)')}</div><div class="small muted">${esc(m.from_name || m.from_addr)} · ${fmtDate(m.date)}</div></div></li>`).join('') || '<li class="muted">Flag an email and it shows up here.</li>'}</ul>`
+        : `<form id="task-add" class="task-add"><input name="title" placeholder="+ Add a task" autocomplete="off"><input type="date" name="due" aria-label="Due date"><button class="btn primary">Add</button></form>
+      <ul class="tasks">${open.map(row).join('') || '<li class="muted">Nothing to do here.</li>'}</ul>
+      ${done.length ? `<details><summary>Completed (${done.length})</summary><ul class="tasks">${done.map(row).join('')}</ul></details>` : ''}`}
+    </section></div>`;
+  const add = $('#task-add', pane);
+  if (add) {
+    add.onsubmit = async (e) => {
+      e.preventDefault();
+      if (!add.title.value.trim()) return;
+      await api('/tasks', { method: 'POST', body: { title: add.title.value, list_name: todo.list.startsWith('__') ? 'Tasks' : todo.list, important: todo.list === '__important', due_at: add.due.value ? new Date(`${add.due.value}T17:00:00`).toISOString() : null } });
+      VIEWS.tasks(pane).then(() => $('#task-add input', pane)?.focus());
+    };
+  }
+  pane.onclick = async (e) => {
+    const l = e.target.closest('[data-list]');
+    if (l) { todo.list = l.dataset.list; return VIEWS.tasks(pane); }
+    const mail = e.target.closest('[data-mail]');
+    if (mail) { showMailView(); return openMessage(Number(mail.dataset.mail)); }
+    const act = e.target.closest('[data-t]')?.dataset.t;
+    if (act === 'newlist') { const n = prompt('List name'); if (n?.trim()) { todo.list = n.trim(); VIEWS.tasks(pane); } return; }
+    const li = e.target.closest('[data-task]');
+    if (!li || !act) return;
+    const t = tasks.find((x) => x.id === Number(li.dataset.task));
+    try {
+      if (act === 'toggle') await api(`/tasks/${t.id}`, { method: 'PATCH', body: { completed: !t.completed } });
+      if (act === 'star') await api(`/tasks/${t.id}`, { method: 'PATCH', body: { important: !t.important } });
+      if (act === 'edit') return editTask(t, pane, listNames);
+      VIEWS.tasks(pane);
+    } catch (ex) { toast(ex.message); }
+  };
+};
+
+function editTask(t, pane, listNames) {
+  const m = modal(`<h2>Task</h2><form>
+    <label>Title<input name="title" value="${esc(t.title)}" required></label>
+    <div class="row"><label>Due<input type="date" name="due" value="${t.due_at ? toLocalInput(t.due_at).slice(0, 10) : ''}"></label>
+    <label>Remind me<input type="datetime-local" name="reminder" value="${t.reminder_at ? toLocalInput(t.reminder_at) : ''}"></label>
+    <label>List<select name="list_name">${listNames.map((n) => `<option ${n === t.list_name ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label></div>
+    <label>Notes<textarea name="notes" rows="4">${esc(t.notes)}</textarea></label>
+    ${t.message_id ? '<button type="button" class="link-btn" id="task-mail">Open the email</button>' : ''}
+    <p class="form-error"></p>
+    <div class="actions"><button type="button" class="btn danger" id="task-del">Delete</button><span class="grow"></span><button class="btn" type="button" data-close>Cancel</button><button class="btn primary">Save</button></div></form>`);
+  const f = $('form', m);
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api(`/tasks/${t.id}`, { method: 'PATCH', body: { title: f.title.value, notes: f.notes.value, list_name: f.list_name.value, due_at: f.due.value ? new Date(`${f.due.value}T17:00:00`).toISOString() : null, reminder_at: f.reminder.value ? new Date(f.reminder.value).toISOString() : null } });
+      closeModal(); VIEWS.tasks(pane);
+    } catch (ex) { $('.form-error', f).textContent = ex.message; }
+  };
+  $('#task-del', f).onclick = async () => { await api(`/tasks/${t.id}`, { method: 'DELETE' }); closeModal(); VIEWS.tasks(pane); };
+  const open = $('#task-mail', f);
+  if (open) open.onclick = () => { closeModal(); showMailView(); openMessage(t.message_id); };
+}
+
 document.addEventListener('keydown', (e) => {
   if (!state.me || e.target.matches('input, textarea, select') || !$('#modal').classList.contains('hidden')) return;
   if (e.key === 'n') { e.preventDefault(); $('#new-mail-btn').click(); }

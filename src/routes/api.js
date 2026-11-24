@@ -14,6 +14,7 @@ import { sendMail, deliverRaw, parseRecipients } from '../mail/delivery.js';
 import * as ai from '../ai/index.js';
 import { audit } from '../audit.js';
 import { features } from './features.js';
+import { calendar, calendarPublic } from './calendar.js';
 
 export const api = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -89,6 +90,8 @@ api.post('/inbound/postmark', express.json({ limit: '40mb' }), wrap(async (req, 
   const delivered = await deliverRaw(Buffer.from(b.RawEmail), rcpts);
   res.json({ delivered });
 }));
+
+api.use(calendarPublic);
 
 // Everything below requires a signed-in user
 api.use(requireAuth);
@@ -254,6 +257,7 @@ api.post('/ai/triage', wrap(async (req, res) => {
 }));
 
 api.use(features);
+api.use(calendar);
 
 // ------------------------------------------------------------ organization admin (private tenants)
 function orgIdFor(req) {

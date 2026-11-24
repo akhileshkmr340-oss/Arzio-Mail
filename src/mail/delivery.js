@@ -13,6 +13,7 @@ import { resolveRecipient, checkInbound, senderListMatch, applyRules, shouldAuto
 import { triage } from '../ai/index.js';
 import { audit } from '../audit.js';
 import { applyTransportRules } from './transport-rules.js';
+import { handleInboundCalendar, processReminders } from '../calendar/service.js';
 
 const OUTBOX_DIR = path.join(config.dataDir, 'outbox');
 const QUEUE_DIR = path.join(config.dataDir, 'queue');
@@ -88,13 +89,25 @@ export async function deliverRaw(raw, recipients, smtp = {}) {
       html: typeof parsed.html === 'string' ? parsed.html : '',
       date: parsed.date || new Date(),
       size: raw.length,
-      attachments: (parsed.attachments || []).map((a) => ({ filename: a.filename, contentType: a.contentType, content: a.content, contentId: a.contentId })),
+      raw,
+      // The inline text/calendar alternative of an invite is not a real attachment
+      attachments: (parsed.attachments || []).filter((a) => !(/^text\/calendar/i.test(a.contentType || '') && !a.filename)).map((a) => ({ filename: a.filename, contentType: a.contentType, content: a.content, contentId: a.contentId })),
     });
     db.prepare('UPDATE messages SET spam_score = ?, auth_results = ? WHERE id = ?').run(check.score, check.auth ? JSON.stringify({ ...check.auth, reasons: check.reasons }) : null, id);
     delivered.push(user.email);
     audit(user.id, 'mail.received', { messageId: id, from: from.address, junk });
 
     if (!junk) {
+      // Meeting invites, replies and cancellations (iMIP)
+      const cal = (parsed.attachments || []).find((a) => /^text\/calendar/i.test(a.contentType || '') || /\.ics$/i.test(a.filename || ''));
+      if (cal) {
+        try {
+          const summary = handleInboundCalendar(user.id, cal.content.toString('utf8'), from.address);
+          if (summary) db.prepare('UPDATE messages SET calendar_json = ? WHERE id = ?').run(JSON.stringify(summary), id);
+        } catch (e) {
+          console.warn('[calendar] could not read invite:', e.message);
+        }
+      }
       const forwards = applyRules(user.id, id);
       for (const to of forwards) enqueueRemoteOrLocal(user.id, raw, user.email, [to], parsed.subject).catch(() => {});
       if (shouldAutoReply(full, parsed, from.address)) sendAutoReply(full, parsed, from).catch((e) => console.warn('[ooo]', e.message));
@@ -364,7 +377,7 @@ export async function performSend(user, input) {
   const sentId = storeMessage(mailboxId, {
     folderRole: 'sent', messageId, inReplyTo: input.inReplyTo, refs: input.references,
     from: { address: fromAddr, name: fromName }, to, cc, bcc,
-    subject: mailOptions.subject, text, html: input.html || '', date: mailOptions.date, isRead: true, size: raw.length,
+    subject: mailOptions.subject, text, html: input.html || '', date: mailOptions.date, isRead: true, size: raw.length, raw,
     attachments,
   });
   db.prepare('INSERT INTO send_log (user_id) VALUES (?)').run(user.id);
@@ -408,6 +421,8 @@ export async function runWorkersOnce() {
     }
     // Snoozed messages come back as unread
     db.prepare("UPDATE messages SET snooze_until = NULL, is_read = 0 WHERE snooze_until IS NOT NULL AND snooze_until <= ?").run(new Date().toISOString());
+    // Event and task reminders
+    processReminders();
   } catch (e) {
     console.error('[worker]', e);
   } finally {
@@ -419,4 +434,28 @@ export function startWorkers(intervalMs = 2000) {
   const t = setInterval(runWorkersOnce, intervalMs);
   t.unref();
   return t;
+}
+
+// ---------------------------------------------------------------- SMTP submission (mail apps)
+
+/**
+ * Send a complete MIME message submitted by a mail app over SMTP AUTH.
+ * The app saves its own copy in Sent over IMAP, so none is stored here.
+ */
+export async function submitRaw(user, raw, envelope) {
+  if (sentToday(user.id) >= config.quotas.sendsPerUserPerDay) throw httpErr(429, 'Daily sending limit reached.');
+  const parsed = await simpleParser(raw);
+  const from = addrList(parsed.from)[0]?.address || '';
+  const allowed = new Set(sendIdentities(user).map((i) => i.address));
+  if (!allowed.has(from) || (envelope.from && !allowed.has(String(envelope.from).toLowerCase()))) {
+    throw httpErr(403, `You can only send as ${[...allowed].join(', ')}.`);
+  }
+  const rcpts = [...new Set(envelope.to.map((a) => String(a).toLowerCase()))];
+  if (!rcpts.length || rcpts.length > 100) throw httpErr(400, 'Between 1 and 100 recipients are allowed.');
+  const flow = applyTransportRules(user, { to: rcpts.map((address) => ({ address })), subject: parsed.subject || '', text: parsed.text || '' });
+  if (flow.block) throw httpErr(403, flow.block);
+  db.prepare('INSERT INTO send_log (user_id) VALUES (?)').run(user.id);
+  recordContacts(user.id, rcpts.map((address) => ({ address, name: '' })));
+  audit(user.id, 'mail.sent', { via: 'smtp', from, to: rcpts, subject: parsed.subject || '' });
+  return enqueueRemoteOrLocal(user.id, raw, from, rcpts, parsed.subject || '');
 }

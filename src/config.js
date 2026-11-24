@@ -49,6 +49,24 @@ export const config = {
     webhookSecret: env.INBOUND_WEBHOOK_SECRET || '',
   },
 
+  // Desktop and phone mail apps (Outlook, Apple Mail, Thunderbird, Gmail app...)
+  imap: {
+    enabled: bool(env.IMAP_ENABLED, true),
+    port: Number(env.IMAP_PORT || 1143), // use 993 with TLS in production
+    host: env.IMAP_HOST || '0.0.0.0',
+    tls: bool(env.IMAP_TLS, false),
+    tlsKey: env.MAIL_TLS_KEY || env.INBOUND_TLS_KEY || '',
+    tlsCert: env.MAIL_TLS_CERT || env.INBOUND_TLS_CERT || '',
+    // Host name shown to users in mail app setup
+    publicHost: env.MAIL_PUBLIC_HOST || `mail.${(env.ARZIO_DOMAIN || 'arzio.local').toLowerCase()}`,
+  },
+  submission: {
+    enabled: bool(env.SUBMISSION_ENABLED, true),
+    port: Number(env.SUBMISSION_PORT || 1587), // use 465 (TLS) or 587 (STARTTLS) in production
+    host: env.SUBMISSION_HOST || '0.0.0.0',
+    tls: bool(env.SUBMISSION_TLS, false),
+  },
+
   outbound: {
     // relay = SMTP relay such as Amazon SES or Postmark (recommended)
     // log   = development: write outgoing mail to data/outbox instead of sending

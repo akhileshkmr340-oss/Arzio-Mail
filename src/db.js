@@ -272,6 +272,109 @@ CREATE TABLE IF NOT EXISTS delivery_queue (
 );
 `);
 
+// ------------------------------------------------------------ Phase 3 schema
+addColumn('messages', 'raw_path', 'TEXT');              // original RFC 5322 source (IMAP, export)
+addColumn('messages', 'calendar_json', 'TEXT');         // parsed meeting invite/reply/cancel carried by the message
+addColumn('messages', 'is_answered', 'INTEGER NOT NULL DEFAULT 0');
+db.exec(`
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  uid TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  start_at TEXT NOT NULL,
+  end_at TEXT NOT NULL,
+  all_day INTEGER NOT NULL DEFAULT 0,
+  recurrence TEXT NOT NULL DEFAULT 'none',   -- none | daily | weekly | monthly | yearly
+  recur_until TEXT,
+  organizer_email TEXT NOT NULL DEFAULT '',
+  organizer_name TEXT NOT NULL DEFAULT '',
+  attendees_json TEXT NOT NULL DEFAULT '[]', -- [{email, name, status}]
+  my_status TEXT NOT NULL DEFAULT 'organizer', -- organizer | needs-action | accepted | tentative | declined
+  sequence INTEGER NOT NULL DEFAULT 0,
+  online_url TEXT NOT NULL DEFAULT '',
+  reminder_minutes INTEGER,
+  reminded_for TEXT,                         -- occurrence start already reminded
+  show_as TEXT NOT NULL DEFAULT 'busy',      -- busy | free | tentative | oof
+  cancelled INTEGER NOT NULL DEFAULT 0,
+  color TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_events_range ON events(user_id, start_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  list_name TEXT NOT NULL DEFAULT 'Tasks',
+  due_at TEXT,
+  reminder_at TEXT,
+  reminded INTEGER NOT NULL DEFAULT 0,
+  important INTEGER NOT NULL DEFAULT 0,
+  completed_at TEXT,
+  message_id INTEGER,                        -- task created from an email
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  link_json TEXT NOT NULL DEFAULT '{}',
+  is_read INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- App passwords for IMAP/SMTP clients (needed when two-step verification is on)
+CREATE TABLE IF NOT EXISTS app_passwords (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  last_used TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Personal access tokens for the API and the MCP server (AI agents)
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  scopes TEXT NOT NULL DEFAULT 'read',        -- read | read,send
+  last_used TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+addColumn('users', 'calendar_feed_token', 'TEXT');
+
+// IMAP: per-folder UIDs that only ever grow. A message gets a fresh UID whenever
+// it lands in a folder (insert or move), so mail apps never miss moved mail.
+addColumn('folders', 'uid_next', 'INTEGER NOT NULL DEFAULT 1');
+addColumn('messages', 'imap_uid', 'INTEGER');
+addColumn('messages', 'imap_deleted', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('messages', 'is_draft', 'INTEGER NOT NULL DEFAULT 0');
+db.exec(`
+UPDATE messages SET imap_uid = id WHERE imap_uid IS NULL;
+UPDATE folders SET uid_next = MAX(uid_next, COALESCE((SELECT MAX(imap_uid) + 1 FROM messages m WHERE m.folder_id = folders.id), 1));
+CREATE INDEX IF NOT EXISTS idx_messages_uid ON messages(folder_id, imap_uid);
+CREATE TRIGGER IF NOT EXISTS trg_messages_uid_insert AFTER INSERT ON messages BEGIN
+  UPDATE messages SET imap_uid = (SELECT uid_next FROM folders WHERE id = NEW.folder_id) WHERE id = NEW.id;
+  UPDATE folders SET uid_next = uid_next + 1 WHERE id = NEW.folder_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_messages_uid_move AFTER UPDATE OF folder_id ON messages WHEN NEW.folder_id != OLD.folder_id BEGIN
+  UPDATE messages SET imap_uid = (SELECT uid_next FROM folders WHERE id = NEW.folder_id), imap_deleted = 0 WHERE id = NEW.id;
+  UPDATE folders SET uid_next = uid_next + 1 WHERE id = NEW.folder_id;
+END;
+`);
+
 export const SYSTEM_FOLDERS = [
   ['Inbox', 'inbox'],
   ['Drafts', 'drafts'],

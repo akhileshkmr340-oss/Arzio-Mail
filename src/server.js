@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { ensurePublicTenant } from './db.js';
 import { api } from './routes/api.js';
+import { mcpRouter } from './mcp.js';
+import { startImap } from './mail/imap.js';
+import { startSubmission } from './mail/smtp-submission.js';
 import { startInboundSmtp } from './mail/smtp-inbound.js';
 import { aiInfo } from './ai/index.js';
 import { startWorkers } from './mail/delivery.js';
@@ -36,6 +39,7 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
+app.use('/mcp', mcpRouter);
 app.use('/api', express.json({ limit: Math.ceil((config.quotas.maxMessageBytes * 1.4) / 1024 / 1024) + 'mb' }));
 app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -56,6 +60,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(`[ai] provider: ${aiInfo().provider}${aiInfo().model ? ` (${aiInfo().model})` : ''}  [outbound] ${config.outbound.transport}`);
   });
   if (config.inbound.smtpEnabled) startInboundSmtp();
+  if (config.imap.enabled) startImap();
+  if (config.submission.enabled) startSubmission();
   startWorkers();
   startMaintenance();
 }

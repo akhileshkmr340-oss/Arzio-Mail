@@ -210,3 +210,82 @@ a { color: var(--brand); }
 .coach { margin: 0 20px 10px; }
 .sources a { display: block; padding: 6px 0; border-bottom: 1px solid var(--line); text-decoration: none; }
 .qr { display: block; margin: 12px 0; }
+
+/* ---------- Phase 3: invites, calendar, To Do, reminders ---------- */
+.bell { position: relative; }
+.bell.has::after { content: attr(data-count); position: absolute; top: -2px; right: -2px; background: var(--danger); color: white; border-radius: 8px; font-size: 10px; padding: 0 4px; line-height: 14px; }
+.invite { display: flex; gap: 12px; border: 1px solid var(--line); border-left: 4px solid var(--brand); border-radius: 8px; margin: 12px 20px; padding: 12px 16px; background: var(--brand-light); }
+.invite.cancelled { border-left-color: var(--danger); background: #fdf3f4; }
+.invite-icon { font-size: 26px; }
+.invite-body > * { margin-bottom: 3px; }
+.invite-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.grow { flex: 1; }
+.pre { white-space: pre-wrap; }
+code.wrap { word-break: break-all; }
+.secret { border: 1px solid #b7d7f5; background: var(--brand-light); border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+.secret code { font-size: 16px; user-select: all; }
+table.kv th { width: 160px; }
+
+#full-pane:has(.cal-head) { padding: 0; display: flex !important; flex-direction: column; }
+.cal-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.cal-head h2 { margin: 0 8px; font-size: 18px; font-weight: 600; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.seg button { border: 0; background: var(--panel); padding: 6px 12px; cursor: pointer; }
+.seg button.active { background: var(--brand-light); color: var(--brand); font-weight: 600; }
+.cal-body { flex: 1; overflow: auto; background: var(--panel); min-height: 0; }
+.cal-grid { display: grid; grid-template-columns: 56px repeat(var(--days), 1fr); }
+.cal-dayhead { text-align: center; padding: 6px 0; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); z-index: 3; cursor: pointer; color: var(--muted); }
+.cal-dayhead b { font-size: 18px; color: var(--text); font-weight: 600; }
+.cal-dayhead.today b { background: var(--brand); color: white; border-radius: 50%; padding: 2px 7px; }
+.cal-allday-label { border-bottom: 1px solid var(--line); padding: 4px; text-align: right; }
+.cal-allday-cell { border-bottom: 1px solid var(--line); border-left: 1px solid var(--line); padding: 2px; min-height: 26px; }
+.cal-hours .cal-hour { height: 44px; font-size: 11px; color: var(--muted); text-align: right; padding-right: 6px; transform: translateY(-7px); }
+.cal-col { position: relative; border-left: 1px solid var(--line); }
+.cal-slot { height: 22px; border-bottom: 1px dotted #eee; cursor: pointer; }
+.cal-slot:nth-child(2n) { border-bottom: 1px solid var(--line); }
+.cal-slot:hover { background: var(--hover); }
+.ev { --ev: var(--brand); background: color-mix(in srgb, var(--ev) 14%, white); border-left: 3px solid var(--ev); border-radius: 4px; padding: 2px 5px; font-size: 12px; overflow: hidden; cursor: pointer; margin: 1px 2px; box-sizing: border-box; }
+.ev:hover { filter: brightness(.96); }
+.ev span { color: var(--muted); }
+.ev.pending { background: repeating-linear-gradient(45deg, #fff, #fff 5px, color-mix(in srgb, var(--ev) 10%, white) 5px, color-mix(in srgb, var(--ev) 10%, white) 10px); }
+.ev.tentative { border-left-style: dashed; }
+.ev.declined { opacity: .5; text-decoration: line-through; }
+.ev.free { background: white; }
+.now-line { position: absolute; left: 0; right: 0; border-top: 2px solid var(--danger); z-index: 2; pointer-events: none; }
+.cal-month { display: grid; grid-template-columns: repeat(7, 1fr); grid-auto-rows: minmax(110px, 1fr); height: 100%; }
+.cal-month .cal-dayhead { position: static; }
+.cal-cell { border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 2px; overflow: hidden; cursor: pointer; }
+.cal-cell.other { background: #fafafa; color: var(--muted); }
+.cal-cell.today .cal-date { background: var(--brand); color: white; }
+.cal-date { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 12px; margin-bottom: 2px; }
+.cal-date:hover { background: var(--hover); }
+.attendees { list-style: none; padding: 0; columns: 2; }
+.sched { margin: 8px 0; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.sched-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+.sched-name { width: 150px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-bar { position: relative; flex: 1; height: 20px; background: #f6f6f6; border-radius: 3px; }
+.sched-busy { position: absolute; top: 2px; bottom: 2px; background: var(--brand); border-radius: 2px; opacity: .75; }
+.sched-busy.tentative { background: repeating-linear-gradient(45deg, var(--brand), var(--brand) 3px, #fff 3px, #fff 6px); }
+.sched-busy.oof { background: #8a3fd1; }
+.sched-sel { position: absolute; top: 0; bottom: 0; border: 2px solid #13a10e; border-radius: 3px; background: rgba(19,161,14,.08); }
+.sched-scale { flex: 1; display: flex; justify-content: space-between; }
+
+.todo { display: grid; grid-template-columns: 220px 1fr; gap: 24px; }
+.todo-lists { display: flex; flex-direction: column; gap: 2px; }
+.todo-lists button[data-list] { text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; }
+.todo-lists button[data-list].active, .todo-lists button[data-list]:hover { background: var(--brand-light); }
+.todo-lists hr { border: 0; border-top: 1px solid var(--line); width: 100%; }
+.task-add { display: flex; gap: 8px; margin-bottom: 12px; }
+.task-add input[name=title] { flex: 1; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.tasks { list-style: none; padding: 0; margin: 0; }
+.task { display: flex; align-items: center; gap: 10px; background: white; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 6px; }
+.task input[type=checkbox] { width: 18px; height: 18px; }
+.task-main { flex: 1; cursor: pointer; }
+.task.done .task-main > div:first-child { text-decoration: line-through; color: var(--muted); }
+.star { color: var(--muted); font-size: 18px; }
+.star.on { color: var(--brand); }
+.overdue { color: var(--danger); }
+@media (max-width: 760px) {
+  .todo { grid-template-columns: 1fr; }
+  .sched-name { width: 90px; }
+}

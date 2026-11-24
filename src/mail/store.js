@@ -7,6 +7,8 @@ import { config } from '../config.js';
 
 const ATTACH_DIR = path.join(config.dataDir, 'attachments');
 fs.mkdirSync(ATTACH_DIR, { recursive: true });
+const RAW_DIR = path.join(config.dataDir, 'raw');
+fs.mkdirSync(RAW_DIR, { recursive: true });
 
 export function folderByRole(userId, role) {
   return db.prepare('SELECT * FROM folders WHERE user_id = ? AND role = ?').get(userId, role);
@@ -120,6 +122,12 @@ export function storeMessage(userId, msg) {
       (msg.date ? new Date(msg.date) : new Date()).toISOString(), size, msg.isRead ? 1 : 0, atts.length ? 1 : 0,
       msg.isFocused === false ? 0 : 1);
     const id = Number(r.lastInsertRowid);
+    if (msg.raw) {
+      // Keep the original MIME so IMAP clients get byte-exact messages
+      const rawPath = path.join(RAW_DIR, `${id}-${crypto.randomUUID()}.eml`);
+      fs.writeFileSync(rawPath, msg.raw);
+      db.prepare('UPDATE messages SET raw_path = ? WHERE id = ?').run(rawPath, id);
+    }
     for (const a of atts) {
       const storage = path.join(ATTACH_DIR, `${id}-${crypto.randomUUID()}`);
       fs.writeFileSync(storage, a.content);
@@ -181,6 +189,14 @@ export function getMessage(userId, id) {
   const m = db.prepare('SELECT * FROM messages WHERE user_id = ? AND id = ?').get(userId, Number(id));
   if (!m) return null;
   const out = hydrate(m);
+  out.calendar = m.calendar_json ? JSON.parse(m.calendar_json) : null;
+  if (out.calendar?.eventId) {
+    const ev = db.prepare('SELECT my_status, cancelled FROM events WHERE id = ? AND user_id = ?').get(out.calendar.eventId, userId);
+    out.calendar.response = ev?.my_status || null;
+    out.calendar.removed = !ev || !!ev.cancelled;
+  }
+  delete out.calendar_json;
+  delete out.raw_path;
   out.attachments = db.prepare('SELECT id, filename, content_type, size FROM attachments WHERE message_id = ?').all(m.id);
   return out;
 }
@@ -219,14 +235,21 @@ export function deleteMessage(userId, id) {
     db.prepare('UPDATE messages SET folder_id = ? WHERE id = ?').run(trash.id, m.id);
   } else {
     // Permanent delete from Deleted Items
-    const atts = db.prepare('SELECT storage_path FROM attachments WHERE message_id = ?').all(m.id);
-    tx(() => {
-      db.prepare('DELETE FROM messages_fts WHERE rowid = ?').run(m.id);
-      db.prepare('DELETE FROM messages WHERE id = ?').run(m.id);
-    });
-    for (const a of atts) fs.rm(a.storage_path, { force: true }, () => {});
+    purgeMessage(m.id);
   }
   return true;
+}
+
+/** Remove a message, its search entry and its files for good. */
+export function purgeMessage(id) {
+  const atts = db.prepare('SELECT storage_path FROM attachments WHERE message_id = ?').all(id);
+  const m = db.prepare('SELECT raw_path FROM messages WHERE id = ?').get(id);
+  tx(() => {
+    db.prepare('DELETE FROM messages_fts WHERE rowid = ?').run(id);
+    db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+  });
+  for (const a of atts) fs.rm(a.storage_path, { force: true }, () => {});
+  if (m?.raw_path) fs.rm(m.raw_path, { force: true }, () => {});
 }
 
 export function saveAi(id, fields) {
@@ -249,4 +272,34 @@ export function searchForQuestion(userId, question, limit = 12) {
   const q = terms.map((t) => `"${t.replace(/"/g, '')}"*`).join(' OR ');
   return db.prepare(`SELECT m.* FROM messages_fts f JOIN messages m ON m.id = f.rowid
     WHERE messages_fts MATCH ? AND m.user_id = ? ORDER BY bm25(messages_fts), m.date DESC LIMIT ?`).all(q, userId, limit).map(hydrate);
+}
+
+/** Save the original MIME for a message that has none yet (used by IMAP). */
+export function saveRaw(id, raw) {
+  const rawPath = path.join(RAW_DIR, `${id}-${crypto.randomUUID()}.eml`);
+  fs.writeFileSync(rawPath, raw);
+  db.prepare('UPDATE messages SET raw_path = ? WHERE id = ?').run(rawPath, id);
+  return rawPath;
+}
+
+/** Copy a message into another folder of the same mailbox (IMAP COPY). Returns the new id. */
+export function copyMessage(userId, id, folderId) {
+  const m = db.prepare('SELECT * FROM messages WHERE id = ? AND user_id = ?').get(Number(id), userId);
+  const f = folderById(userId, folderId);
+  if (!m || !f) return null;
+  const skip = new Set(['id', 'folder_id', 'imap_uid', 'imap_deleted', 'raw_path', 'created_at']);
+  const cols = Object.keys(m).filter((c) => !skip.has(c));
+  return tx(() => {
+    const r = db.prepare(`INSERT INTO messages (folder_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).run(f.id, ...cols.map((c) => m[c]));
+    const nid = Number(r.lastInsertRowid);
+    if (m.raw_path && fs.existsSync(m.raw_path)) saveRaw(nid, fs.readFileSync(m.raw_path));
+    for (const a of db.prepare('SELECT * FROM attachments WHERE message_id = ?').all(m.id)) {
+      const storage = path.join(ATTACH_DIR, `${nid}-${crypto.randomUUID()}`);
+      fs.copyFileSync(a.storage_path, storage);
+      db.prepare('INSERT INTO attachments (message_id, filename, content_type, size, storage_path, content_id) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(nid, a.filename, a.content_type, a.size, storage, a.content_id);
+    }
+    db.prepare('INSERT INTO messages_fts (rowid, subject, body, people) SELECT ?, subject, body, people FROM messages_fts WHERE rowid = ?').run(nid, m.id);
+    return nid;
+  });
 }

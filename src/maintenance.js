@@ -1,15 +1,10 @@
 // Hourly housekeeping: empty old Deleted Items, apply organization retention
 // policies (skipped under litigation hold), clear expired sessions and old queue rows.
-import fs from 'node:fs';
 import { db } from './db.js';
+import { purgeMessage } from './mail/store.js';
 
 function purge(rows) {
-  for (const m of rows) {
-    const atts = db.prepare('SELECT storage_path FROM attachments WHERE message_id = ?').all(m.id);
-    db.prepare('DELETE FROM messages_fts WHERE rowid = ?').run(m.id);
-    db.prepare('DELETE FROM messages WHERE id = ?').run(m.id);
-    for (const a of atts) fs.rm(a.storage_path, { force: true }, () => {});
-  }
+  for (const m of rows) purgeMessage(m.id);
   return rows.length;
 }
 

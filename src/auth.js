@@ -141,7 +141,68 @@ export function sessionCookie(token, expires) {
   return parts.join('; ');
 }
 
+// ------------------------------------------------------------ API tokens and app passwords
+
+const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+
+/** Personal access token for the REST API and the MCP server. Shown once. */
+export function createApiToken(userId, name, scopes = 'read') {
+  const token = `arz_${crypto.randomBytes(24).toString('base64url')}`;
+  const sc = scopes === 'read,send' ? 'read,send' : 'read';
+  const r = db.prepare('INSERT INTO api_tokens (user_id, name, token_hash, scopes) VALUES (?, ?, ?, ?)').run(userId, String(name || 'Token').slice(0, 80), sha256(token), sc);
+  return { id: Number(r.lastInsertRowid), token, scopes: sc };
+}
+
+export function userFromApiToken(token) {
+  if (!/^arz_[A-Za-z0-9_-]{20,}$/.test(String(token || ''))) return null;
+  const t = db.prepare('SELECT id, user_id, scopes FROM api_tokens WHERE token_hash = ?').get(sha256(token));
+  if (!t) return null;
+  const u = getUser(t.user_id);
+  if (!u || u.is_disabled) return null;
+  db.prepare("UPDATE api_tokens SET last_used = datetime('now') WHERE id = ?").run(t.id);
+  return { user: u, scopes: t.scopes.split(',') };
+}
+
+/** App password for desktop and phone mail apps (IMAP/SMTP). 16 letters, shown once. */
+export function createAppPassword(userId, name) {
+  const alphabet = 'abcdefghijkmnpqrstuvwxyz';
+  const bytes = crypto.randomBytes(16);
+  const pw = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+  const r = db.prepare('INSERT INTO app_passwords (user_id, name, password_hash) VALUES (?, ?, ?)').run(userId, String(name || 'Mail app').slice(0, 80), sha256(pw));
+  return { id: Number(r.lastInsertRowid), password: pw.replace(/(.{4})(?=.)/g, '$1 ') };
+}
+
+/**
+ * Sign-in for IMAP and SMTP submission. Accepts an app password, or the account
+ * password when two-step verification is off. Returns the user or null.
+ */
+export function clientLogin(emailOrUser, password) {
+  let email = String(emailOrUser || '').trim().toLowerCase();
+  if (!email.includes('@')) email = `${email}@${config.primaryDomain}`;
+  const u = findUserByEmail(email);
+  const pw = String(password || '');
+  if (!u || u.is_disabled || u.mailbox_type === 'shared') { verifyPassword(pw, DUMMY_HASH); return null; }
+  const app = db.prepare('SELECT id FROM app_passwords WHERE user_id = ? AND password_hash = ?').get(u.id, sha256(pw.replace(/\s+/g, '')));
+  if (app) {
+    db.prepare("UPDATE app_passwords SET last_used = datetime('now') WHERE id = ?").run(app.id);
+    return getUser(u.id);
+  }
+  if (!u.totp_enabled && verifyPassword(pw, u.password_hash)) return getUser(u.id);
+  return null;
+}
+
 export function requireAuth(req, res, next) {
+  const bearer = String(req.headers.authorization || '').match(/^Bearer\s+(\S+)$/i)?.[1];
+  if (bearer) {
+    const t = userFromApiToken(bearer);
+    if (!t) return res.status(401).json({ error: 'That API token is not valid.' });
+    // Read-only tokens may only read; tokens never manage the account itself
+    if (req.method !== 'GET' && !t.scopes.includes('send')) return res.status(403).json({ error: 'This token is read-only.' });
+    if (/^\/(me|org|admin)(\/|$)/.test(req.path) && req.method !== 'GET') return res.status(403).json({ error: 'API tokens cannot change account settings.' });
+    req.user = t.user;
+    req.tokenScopes = t.scopes;
+    return next();
+  }
   const user = userFromToken(parseCookies(req.headers.cookie)[COOKIE]);
   if (!user) return res.status(401).json({ error: 'Please sign in.' });
   req.user = user;
