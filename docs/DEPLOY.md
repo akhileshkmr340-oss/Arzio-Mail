@@ -23,7 +23,8 @@ Firewall: allow 22, 25, 80, 443, 465 and 993. Nothing else.
 
 | Type | Name | Value |
 | --- | --- | --- |
-| A | `mail.arzio.com` | server IP (web app, IMAP, SMTP for mail apps, CalDAV) |
+| A | `mail.arzio.com` | server IP (web app, Exchange ActiveSync, IMAP, SMTP for mail apps, CalDAV) |
+| CNAME | `autodiscover.arzio.com` | `mail.arzio.com` (phones find the Exchange server from the address alone; needs a certificate that includes this name) |
 | A | `mx.arzio.com` | server IP (inbound mail) |
 | MX | `arzio.com` | `10 mx.arzio.com` |
 | TXT | `arzio.com` | `v=spf1 include:amazonses.com ~all` (Postmark: `include:spf.mtasv.net`) |
@@ -52,7 +53,7 @@ admin center shows them under **Domains**.
 ```bash
 sudo apt install -y certbot
 sudo mkdir -p /var/www/certbot
-sudo certbot certonly --standalone -d mail.arzio.com -d mx.arzio.com
+sudo certbot certonly --standalone -d mail.arzio.com -d mx.arzio.com -d autodiscover.arzio.com
 sudo cp deploy/certbot-deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/arzio.sh
 sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/arzio.sh
 sudo ARZIO_CERT_HOST=mail.arzio.com /etc/letsencrypt/renewal-hooks/deploy/arzio.sh
@@ -138,8 +139,9 @@ Keep `.env` out of git. It holds your relay password and AI key.
 - `curl https://mail.arzio.com/ready` returns `"ok": true`.
 - Send from an outside Gmail account to a new user. It arrives in the inbox.
 - Reply. Check the Gmail "Show original" view: SPF, DKIM and DMARC say PASS.
-- Add the account to a phone mail app with the settings in **Settings > Mail
-  apps & AI agents**, and the calendar and contacts with the CalDAV/CardDAV
-  settings on the same page.
+- Add the account to a phone as an **Exchange** account (Settings > Phones,
+  mail apps & AI agents shows the server). Mail, calendar and contacts
+  appear, and a message sent from another account arrives within seconds.
+- Add it to a desktop mail app over IMAP with the settings on the same page.
 - Run a backup by hand and restore it onto a test machine once
   ([OPERATIONS.md](OPERATIONS.md#restore)).

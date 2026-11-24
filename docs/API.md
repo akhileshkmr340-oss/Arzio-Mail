@@ -65,6 +65,8 @@ curl -H "Authorization: Bearer $ARZIO_TOKEN" -H "Content-Type: application/json"
 | GET, POST, DELETE | `/me/aliases`, `/me/delegates` | aliases, mailbox delegates |
 | GET | `/me/identities`, `/me/mailboxes` | addresses you can send from, mailboxes you can open |
 | GET, POST, DELETE | `/me/app-passwords` | app passwords for mail apps |
+| GET | `/me/devices` | phones connected with Exchange ActiveSync |
+| POST | `/me/devices/:id` | `{ "action": "block" \| "allow" \| "wipe" \| "remove" }` |
 | GET, POST, DELETE | `/me/tokens` | API tokens |
 | GET, POST | `/me/import`, `/me/import/imap`, `/me/import/file` | import from another account or an .mbox / .eml file |
 
@@ -114,6 +116,7 @@ curl -H "Authorization: Bearer $ARZIO_TOKEN" -H "Content-Type: application/json"
 | Protocol | Address | Use |
 | --- | --- | --- |
 | MCP | `https://mail.arzio.com/mcp` with `Authorization: Bearer <token>` | AI assistants such as Claude: `list_folders`, `search_mail`, `read_message`, `list_events`, `list_tasks`, and with a send token `send_mail`, `create_event`, `create_task`, `complete_task` |
+| Exchange ActiveSync | `https://mail.arzio.com/Microsoft-Server-ActiveSync` (found from `/autodiscover/autodiscover.xml`), protocol 12.0 to 14.1 | phones: mail, calendar, contacts, tasks, push, remote wipe |
 | IMAP | `mail.arzio.com:993` TLS | desktop and phone mail apps |
 | SMTP | `mail.arzio.com:465` TLS, sign-in required | sending from mail apps |
 | CalDAV / CardDAV | `https://mail.arzio.com/dav/` (found from `/.well-known/caldav`) | calendar and contacts sync on iPhone, Mac, Android (DAVx⁵), Thunderbird |

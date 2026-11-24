@@ -20,7 +20,7 @@ It has built-in AI (Claude by default): thread summaries with action items, repl
 | AI | Summarize, draft and rewrite, triage, writing coach, "Ask Arzio" questions over your mailbox, meeting prep briefs. Claude by default, pluggable; a basic built-in fallback works without a key |
 | AI agents | MCP server at `/mcp` so assistants such as Claude can search and read mail, send, create events and tasks with a personal API token (read-only or read-and-act) |
 | Mail apps | IMAP server and SMTP submission, so Outlook desktop, Apple Mail, Thunderbird and phone mail apps work; app passwords for accounts with two-step verification |
-| Phone sync | CalDAV and CardDAV: calendar and contacts sync both ways with iPhone, iPad, Mac, Android (DAVx⁵) and Thunderbird |
+| Phone sync | Exchange ActiveSync: add an "Exchange" account on iPhone, Android, Outlook for iOS/Android or Samsung Email and get mail, calendar, contacts and tasks with instant push; remote wipe and block from Settings. CalDAV and CardDAV for Mac, Thunderbird and DAVx⁵ |
 | Install | Installable web app (PWA) on Windows, Mac, Android and iPhone, with reminders as notifications |
 | Tenants | Public tenant with open signup; private organizations with custom domains and DNS verification |
 | Admin center | Users, shared mailboxes (support@, info@), groups / distribution lists, domains, mail flow rules with data loss prevention (card, Aadhaar, PAN, IBAN, SSN), message trace, audit log, usage reports |
@@ -60,13 +60,17 @@ Run the tests: `npm test` (39 tests).
 
 ### Connecting a mail app
 
-In development IMAP listens on port 1143 and SMTP submission on 1587 without TLS. In production set `IMAP_PORT=993 IMAP_TLS=true`, `SUBMISSION_PORT=465 SUBMISSION_TLS=true` and `MAIL_TLS_KEY/MAIL_TLS_CERT` for `mail.arzio.com`. Users see the exact settings in **Settings > Mail apps & AI agents**, where they can also create app passwords.
+In development IMAP listens on port 1143 and SMTP submission on 1587 without TLS. In production set `IMAP_PORT=993 IMAP_TLS=true`, `SUBMISSION_PORT=465 SUBMISSION_TLS=true` and `MAIL_TLS_KEY/MAIL_TLS_CERT` for `mail.arzio.com`. Users see the exact settings in **Settings > Phones, mail apps & AI agents**, where they can also create app passwords.
 
 ### Connecting an AI assistant (MCP)
 
-Create a token in **Settings > Mail apps & AI agents**, then add `https://mail.arzio.com/mcp` as a remote MCP server with the header `Authorization: Bearer <token>`. Tools: `list_folders`, `search_mail`, `read_message`, `list_events`, `list_tasks`, and with a read-and-act token `send_mail`, `create_event`, `create_task`, `complete_task`. The same token works with the REST API: see [docs/API.md](docs/API.md).
+Create a token in **Settings > Phones, mail apps & AI agents**, then add `https://mail.arzio.com/mcp` as a remote MCP server with the header `Authorization: Bearer <token>`. Tools: `list_folders`, `search_mail`, `read_message`, `list_events`, `list_tasks`, and with a read-and-act token `send_mail`, `create_event`, `create_task`, `complete_task`. The same token works with the REST API: see [docs/API.md](docs/API.md).
 
-### Calendar and contacts on a phone
+### Phones (Exchange ActiveSync)
+
+On the phone add an **Exchange** account with the Arzio address and password (an app password with two-step verification on). The server is `mail.arzio.com`; most apps find it on their own through `/autodiscover/autodiscover.xml` if `autodiscover.arzio.com` points at the server. Mail, calendar, contacts and tasks sync both ways, new mail is pushed, and sending, replying, forwarding, moving, search, out-of-office and meeting replies all work from the phone. Users see their phones in **Settings > Phones, mail apps & AI agents** and can block, remove or remotely wipe one. Set `ARZIO_EAS_REQUIRE_PASSCODE=6` to make phones use a screen lock of at least 6 digits.
+
+### Calendar and contacts on a Mac or with DAVx⁵
 
 Add a CalDAV account and a CardDAV account with server `https://mail.arzio.com/dav/` (apps also find it from just `mail.arzio.com`), your address and your password or an app password.
 
@@ -97,6 +101,7 @@ src/
   health.js              /health, /ready, /metrics
   billing.js             plans, limits, Stripe and Razorpay, invoices
   dav.js                 CalDAV and CardDAV
+  eas/                   Exchange ActiveSync (WBXML, sync, push, provisioning)
   mcp.js                 MCP server for AI agents
   audit.js, mfa.js, maintenance.js
   routes/api.js          mail, folders, drafts, AI, org and service admin, inbound webhooks
@@ -116,14 +121,14 @@ public/                  web app (PWA)
 scripts/                 create-admin, backup, restore
 deploy/                  docker-compose, nginx, systemd, certificate hook
 docs/                    DEPLOY, OPERATIONS, API, BILLING
-test/                    39 end-to-end tests
+test/                    46 end-to-end tests
 ```
 
 ## Known limits
 
 - Virus scanning of attachments is not built in; add ClamAV at the MX for production.
 - Native iOS and Android apps are not included. Phones use the installable web app, or their built-in mail app over IMAP.
-- Exchange ActiveSync and EWS are not supported; Outlook desktop connects over IMAP, and phones sync calendar and contacts over CalDAV/CardDAV.
+- Exchange Web Services (EWS) and MAPI are not supported, so Outlook for Windows and Mac connects over IMAP (its calendar then comes from the subscription link or CalDAV). Phones use Exchange ActiveSync. ActiveSync was tested with a scripted phone client that follows the protocol documents, not yet with each phone model; try your phones before rollout.
 - S/MIME and Microsoft Purview-style message encryption are not built in. Mail is protected in transit with TLS (set the TLS certificates) and access is controlled by sign-in and two-step verification.
 - Microsoft 365 work accounts can only be imported if their admin allows IMAP with basic sign-in; otherwise export to .pst/.mbox first.
 - Online meetings: events take a meeting link (Teams, Zoom, Meet, Jitsi), but Arzio has no video service of its own.

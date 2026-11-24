@@ -265,7 +265,7 @@ function folderForName(userId, name) {
 }
 const nameOf = (f) => (f.role === 'inbox' ? 'INBOX' : encodeMailbox(f.name));
 
-async function rawOf(m) {
+export async function rawOf(m) {
   const stored = m.raw_path ? blobs.get(m.raw_path) : null;
   if (stored) return stored;
   // Messages without stored MIME (drafts written in the web app, system notices): build it once

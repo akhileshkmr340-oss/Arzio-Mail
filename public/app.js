@@ -866,7 +866,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 // ------------------------------------------------------------ settings (tabbed)
 const SETTINGS_TABS = [
   ['general', 'General'], ['ooo', 'Automatic replies'], ['rules', 'Rules'], ['junk', 'Junk email'],
-  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Mail apps & AI agents'], ['import', 'Import mail'], ['billing', 'Plan & billing'],
+  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Phones, mail apps & AI agents'], ['import', 'Import mail'], ['billing', 'Plan & billing'],
 ];
 
 async function openSettings(tab = 'general', ruleSeed = null) {
@@ -1079,9 +1079,18 @@ async function openSettings(tab = 'general', ruleSeed = null) {
   }
 
   if (tab === 'apps') {
-    const [{ appPasswords, servers }, { tokens }, feed] = await Promise.all([api('/me/app-passwords'), api('/me/tokens'), api('/calendar/feed')]);
+    const [{ appPasswords, servers }, { tokens }, feed, { devices }] = await Promise.all([api('/me/app-passwords'), api('/me/tokens'), api('/calendar/feed'), api('/me/devices')]);
+    const devStatus = { allowed: 'Connected', blocked: 'Blocked', wipe: 'Wipe requested', wiped: 'Wiped' };
     const when = (d) => (d ? fmtDate(`${d.replace(' ', 'T')}Z`, true) : 'never');
-    body.innerHTML = `<h3>Outlook, Apple Mail, Thunderbird and phone mail apps</h3>
+    body.innerHTML = `<h3>Phones and tablets (Exchange)</h3>
+      <p class="muted">The quickest way to get mail, calendar, contacts and tasks with instant push on iPhone, Android, Outlook for iOS and Android, Samsung Email and Windows Mail. Add an <strong>Exchange</strong> account (on Android: "Exchange" or "Corporate"), enter your address and ${u.totp_enabled ? 'an app password' : 'password'}. If the app asks for a server, use the one below.</p>
+      <table class="kv"><tr><th>Email</th><td><code>${esc(servers.username)}</code></td></tr><tr><th>Server</th><td><code>${esc(servers.exchange.server)}</code></td></tr><tr><th>Domain</th><td class="muted">Leave empty</td></tr></table>
+      <h4>Connected phones</h4>
+      <table id="devices">${devices.map((d) => `<tr><td><strong>${esc(d.friendly_name || d.model || d.device_type || 'Phone')}</strong><div class="muted small">${esc([d.model, d.os].filter(Boolean).join(', ') || d.user_agent)}</div></td>
+        <td class="small">${devStatus[d.status] || esc(d.status)}<div class="muted">last synced ${when(d.last_seen)}</div></td>
+        <td>${d.status === 'blocked' ? `<button class="link-btn" data-dev="${d.id}" data-act="allow">Allow</button>` : d.status === 'allowed' ? `<button class="link-btn" data-dev="${d.id}" data-act="block">Block</button> <button class="link-btn danger" data-dev="${d.id}" data-act="wipe">Wipe</button>` : ''}
+        <button class="link-btn" data-dev="${d.id}" data-act="remove">Remove</button></td></tr>`).join('') || '<tr><td class="muted">No phones connected with Exchange yet.</td></tr>'}</table>
+      <h3>Outlook, Apple Mail, Thunderbird and other mail apps (IMAP)</h3>
       <p class="muted">Add your account as an <strong>IMAP</strong> account with these settings.${u.totp_enabled ? ' Because two-step verification is on, sign in with an app password below instead of your normal password.' : ' You can sign in with your normal password, or create an app password for each device.'}</p>
       <table class="kv"><tr><th>Username</th><td><code>${esc(servers.username)}</code></td></tr>
       <tr><th>Incoming (IMAP)</th><td><code>${esc(servers.imap.host)}</code> port <code>${servers.imap.port}</code>, ${esc(servers.imap.security)}</td></tr>
@@ -1110,7 +1119,16 @@ async function openSettings(tab = 'general', ruleSeed = null) {
     body.onclick = async (e) => {
       const ap = e.target.closest('[data-del-ap]');
       const tok = e.target.closest('[data-del-tok]');
+      const dev = e.target.closest('[data-dev]');
       try {
+        if (dev) {
+          const act = dev.dataset.act;
+          const ask = { wipe: 'Erase this phone? Most phones reset to factory settings, which deletes everything on them, not only Arzio mail. Use this only if the phone is lost or stolen.',
+            remove: 'Remove this phone from the list? It will set itself up again the next time it connects, unless you change your password.', block: 'Block this phone? It stops syncing until you allow it again.' }[act];
+          if (ask && !confirm(ask)) return;
+          await api(`/me/devices/${dev.dataset.dev}`, { method: 'POST', body: { action: act } });
+          return openSettings('apps');
+        }
         if (ap) { await api(`/me/app-passwords/${ap.dataset.delAp}`, { method: 'DELETE' }); openSettings('apps'); }
         if (tok) { await api(`/me/tokens/${tok.dataset.delTok}`, { method: 'DELETE' }); openSettings('apps'); }
         if (e.target.id === 'feed-reset') { await api('/calendar/feed', { method: 'POST', body: {} }); openSettings('apps'); }

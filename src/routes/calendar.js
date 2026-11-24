@@ -6,6 +6,7 @@ import { db } from '../db.js';
 import { config } from '../config.js';
 import { httpError, createApiToken, createAppPassword } from '../auth.js';
 import * as cal from '../calendar/service.js';
+import * as eas from '../eas/index.js';
 import * as store from '../mail/store.js';
 import * as ai from '../ai/index.js';
 import { audit } from '../audit.js';
@@ -186,9 +187,20 @@ calendar.get('/me/app-passwords', (req, res) => {
     servers: {
       imap: { host: config.imap.publicHost, port: config.imap.port, security: config.imap.tls ? 'SSL/TLS' : 'None (development)' },
       smtp: { host: config.imap.publicHost, port: config.submission.port, security: config.submission.tls ? 'SSL/TLS' : 'None (development)' },
+      exchange: { server: req.get('host'), url: `${req.protocol}://${req.get('host')}/Microsoft-Server-ActiveSync` },
       username: req.user.email,
     },
   });
+});
+
+// ------------------------------------------------------------ phones connected with Exchange ActiveSync
+calendar.get('/me/devices', (req, res) => res.json({ devices: eas.listDevices(req.user.id) }));
+calendar.post('/me/devices/:id', (req, res) => {
+  if (req.tokenScopes) return res.status(403).json({ error: 'API tokens cannot manage devices.' });
+  const action = { block: 'blocked', allow: 'allowed', wipe: 'wipe', remove: 'remove' }[req.body?.action];
+  if (!action) throw httpError(400, 'Choose block, allow, wipe or remove.');
+  if (!eas.setDeviceStatus(req.user.id, req.params.id, action)) throw httpError(404, 'Device not found.');
+  res.json({ ok: true, devices: eas.listDevices(req.user.id) });
 });
 calendar.post('/me/app-passwords', (req, res) => {
   if (req.tokenScopes) return res.status(403).json({ error: 'API tokens cannot create passwords.' });

@@ -93,6 +93,25 @@ These run inside the server, with nothing to schedule:
   organization retention, clears expired sessions and old queue rows. Nothing
   is deleted while an organization is on litigation hold.
 
+## Phones (Exchange ActiveSync)
+
+Phones keep one request open to `/Microsoft-Server-ActiveSync` for push and
+the server checks their folders every `ARZIO_EAS_POLL_MS` (5 seconds). Any
+proxy in front must allow requests that last longer than
+`ARZIO_EAS_MAX_HEARTBEAT` (28 minutes); the nginx kit sets 30 minutes for that
+path. With several servers this works unchanged, because the phone's sync
+state is in the database.
+
+- Users see and manage their phones in **Settings > Phones, mail apps & AI
+  agents**: block, allow, remove, or wipe a lost phone. Every new phone, block
+  and wipe is written to the audit log (`security.device.*`).
+- A wipe resets most phones to factory settings. The phone confirms it and the
+  device shows as **Wiped**.
+- Changing a user's password, or removing their app password, stops their
+  phones at the next request.
+- To see what a phone sends, set `ARZIO_EAS_DEBUG=true` for a short time. The
+  log then contains mail content; turn it off afterwards.
+
 ## Security checklist
 
 - Two-step verification on for every admin account.
