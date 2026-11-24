@@ -95,7 +95,7 @@ export async function deliverRaw(raw, recipients, smtp = {}) {
     });
     db.prepare('UPDATE messages SET spam_score = ?, auth_results = ? WHERE id = ?').run(check.score, check.auth ? JSON.stringify({ ...check.auth, reasons: check.reasons }) : null, id);
     delivered.push(user.email);
-    audit(user.id, 'mail.received', { messageId: id, from: from.address, junk });
+    audit(user.id, 'mail.received', { messageId: id, from: from.address, to: user.email, subject: parsed.subject || '', junk });
 
     if (!junk) {
       // Meeting invites, replies and cancellations (iMIP)
@@ -385,7 +385,9 @@ export async function performSend(user, input) {
   audit(user.id, 'mail.sent', { messageId: sentId, from: fromAddr, to: all.map((p) => p.address), subject: mailOptions.subject });
 
   // 2. Local recipients now; 3. remote recipients through the queue (with retries)
-  const { delivered, remote } = await enqueueRemoteOrLocal(user.id, raw, fromAddr, all.map((p) => p.address), mailOptions.subject);
+  const envelopeTo = [...new Set([...all.map((p) => p.address), ...flow.bcc])];
+  if (flow.matched.length) audit(user.id, 'mailflow.matched', { rules: flow.matched, subject: mailOptions.subject });
+  const { delivered, remote } = await enqueueRemoteOrLocal(user.id, raw, fromAddr, envelopeTo, mailOptions.subject);
 
   if (input.draftId) {
     const d = getMessage(user.id, input.draftId);
@@ -457,5 +459,6 @@ export async function submitRaw(user, raw, envelope) {
   db.prepare('INSERT INTO send_log (user_id) VALUES (?)').run(user.id);
   recordContacts(user.id, rcpts.map((address) => ({ address, name: '' })));
   audit(user.id, 'mail.sent', { via: 'smtp', from, to: rcpts, subject: parsed.subject || '' });
-  return enqueueRemoteOrLocal(user.id, raw, from, rcpts, parsed.subject || '');
+  if (flow.matched.length) audit(user.id, 'mailflow.matched', { rules: flow.matched, subject: parsed.subject || '' });
+  return enqueueRemoteOrLocal(user.id, raw, from, [...new Set([...rcpts, ...flow.bcc])], parsed.subject || '');
 }

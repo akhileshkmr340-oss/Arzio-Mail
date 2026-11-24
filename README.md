@@ -21,7 +21,10 @@ It has built-in AI (Claude by default): thread summaries with action items, repl
 | AI agents | MCP server at `/mcp` so assistants such as Claude can search and read mail, send, create events and tasks with a personal API token (read-only or read-and-act) |
 | Mail apps | IMAP server and SMTP submission, so Outlook desktop, Apple Mail, Thunderbird and phone mail apps work; app passwords for accounts with two-step verification |
 | Install | Installable web app (PWA) on Windows, Mac, Android and iPhone, with reminders as notifications |
-| Tenants | Public tenant with open signup; private organizations with custom domains, DNS verification, user management, groups, mail flow rules, retention and litigation hold |
+| Tenants | Public tenant with open signup; private organizations with custom domains and DNS verification |
+| Admin center | Users, shared mailboxes (support@, info@), groups / distribution lists, domains, mail flow rules with data loss prevention (card, Aadhaar, PAN, IBAN, SSN), message trace, audit log, usage reports |
+| Compliance | Retention policies, litigation hold (deleted mail kept hidden), eDiscovery search across all mailboxes with .mbox export |
+| Migration | Import from Gmail, Outlook / Microsoft 365, Yahoo, Zoho or any IMAP account in the background; .mbox (Google Takeout) and .eml upload |
 | Security | scrypt passwords, two-step verification (authenticator apps), HttpOnly sessions, rate limits, SPF/DKIM/DMARC checks and spam scoring on inbound mail, sandboxed HTML mail, CSP, audit log |
 
 ## Run it locally
@@ -99,5 +102,7 @@ test/api.test.js
 - Virus scanning of attachments is not built in; add ClamAV at the MX for production.
 - Native iOS and Android apps are not included. Phones use the installable web app, or their built-in mail app over IMAP.
 - Exchange ActiveSync and EWS are not supported; Outlook desktop connects over IMAP.
+- S/MIME and Microsoft Purview-style message encryption are not built in. Mail is protected in transit with TLS (set the TLS certificates) and access is controlled by sign-in and two-step verification.
+- Microsoft 365 work accounts can only be imported if their admin allows IMAP with basic sign-in; otherwise export to .pst/.mbox first.
 - Online meetings: events take a meeting link (Teams, Zoom, Meet, Jitsi), but Arzio has no video service of its own.
 - The Claude integration was tested up to the API call; run one summary with a real `ANTHROPIC_API_KEY` to confirm end to end.

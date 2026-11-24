@@ -15,6 +15,7 @@ import * as ai from '../ai/index.js';
 import { audit } from '../audit.js';
 import { features } from './features.js';
 import { calendar, calendarPublic } from './calendar.js';
+import { admin } from './admin.js';
 
 export const api = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -258,6 +259,7 @@ api.post('/ai/triage', wrap(async (req, res) => {
 
 api.use(features);
 api.use(calendar);
+api.use(admin);
 
 // ------------------------------------------------------------ organization admin (private tenants)
 function orgIdFor(req) {
@@ -273,7 +275,7 @@ api.get('/org', requireOrgAdmin, (req, res) => {
 });
 
 api.get('/org/users', requireOrgAdmin, (req, res) => {
-  res.json({ users: db.prepare('SELECT id, email, name, role, is_disabled, created_at FROM users WHERE org_id = ? ORDER BY email').all(orgIdFor(req)) });
+  res.json({ users: db.prepare('SELECT id, email, name, role, is_disabled, created_at FROM users WHERE org_id = ? AND mailbox_type != \'shared\' ORDER BY email').all(orgIdFor(req)) });
 });
 
 api.post('/org/users', requireOrgAdmin, wrap(async (req, res) => {

@@ -355,6 +355,20 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 `);
 addColumn('users', 'calendar_feed_token', 'TEXT');
 
+// Mail import (Gmail, Microsoft 365, any IMAP server, .eml / .mbox files)
+db.exec(`CREATE TABLE IF NOT EXISTS import_jobs (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',     -- running | done | failed
+  imported INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  current TEXT NOT NULL DEFAULT '',
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+)`);
+
 // IMAP: per-folder UIDs that only ever grow. A message gets a fresh UID whenever
 // it lands in a folder (insert or move), so mail apps never miss moved mail.
 addColumn('folders', 'uid_next', 'INTEGER NOT NULL DEFAULT 1');

@@ -837,7 +837,7 @@ async function composerAction(act, btn) {
   } catch (e) { toast(e.message); }
 }
 
-$('#new-mail-btn').addEventListener('click', () => { state.selectedId = null; renderList(); openComposer('new'); $('#sidebar').classList.remove('open'); });
+$('#new-mail-btn').addEventListener('click', () => { if (state.view !== 'mail') showMailView(); state.selectedId = null; renderList(); openComposer('new'); $('#sidebar').classList.remove('open'); });
 
 // ------------------------------------------------------------ menus, settings, admin
 $('#nav-toggle').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
@@ -864,7 +864,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 // ------------------------------------------------------------ settings (tabbed)
 const SETTINGS_TABS = [
   ['general', 'General'], ['ooo', 'Automatic replies'], ['rules', 'Rules'], ['junk', 'Junk email'],
-  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Mail apps & AI agents'],
+  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Mail apps & AI agents'], ['import', 'Import mail'],
 ];
 
 async function openSettings(tab = 'general', ruleSeed = null) {
@@ -1029,6 +1029,44 @@ async function openSettings(tab = 'general', ruleSeed = null) {
     $('#pw-form', body).onsubmit = async (e) => { e.preventDefault(); try { await api('/me', { method: 'PATCH', body: { currentPassword: e.target.currentPassword.value, newPassword: e.target.newPassword.value } }); toast('Password changed.'); e.target.reset(); } catch (ex) { err.textContent = ex.message; } };
   }
 
+  if (tab === 'import') {
+    const { jobs, presets } = await api('/me/import');
+    const names = { gmail: 'Gmail', outlook: 'Outlook / Microsoft 365', yahoo: 'Yahoo Mail', zoho: 'Zoho Mail' };
+    body.innerHTML = `<h3>Copy mail from another account</h3>
+      <p class="muted">Bring your mail, folders and labels from Gmail, Outlook / Microsoft 365, Yahoo or any IMAP account. It runs in the background; duplicates are skipped.</p>
+      <form id="imp-form"><div class="row"><label>From<select name="provider">${Object.keys(presets).map((k) => `<option value="${k}">${names[k] || k}</option>`).join('')}<option value="other">Other IMAP server</option></select></label>
+        <label class="imp-host hidden">IMAP server<input name="host" placeholder="imap.example.com"></label><label class="imp-host hidden">Port<input name="port" value="993" style="width:80px"></label></div>
+        <p class="muted small" id="imp-note">${esc(presets.gmail.note)}</p>
+        <div class="row"><label>Email address<input name="username" required></label><label>Password or app password<input name="password" type="password" required></label></div>
+        <button class="btn primary">Start import</button></form>
+      <h3>Upload a file</h3>
+      <p class="muted">An <strong>.mbox</strong> archive (Google Takeout, Thunderbird, Apple Mail export) or an <strong>.eml</strong> message, up to 25 MB. Messages go to Archive. For bigger archives, use the account import above.</p>
+      <input type="file" id="imp-file" accept=".mbox,.eml,message/rfc822">
+      <h3>Recent imports</h3>
+      <table>${jobs.map((j) => `<tr><td>${esc(j.source)}</td><td>${j.status === 'running' ? `Running… ${j.imported} copied${j.current ? ` (${esc(j.current)})` : ''}` : j.status === 'done' ? `✔ Done: ${j.imported} copied, ${j.skipped} already here` : `✖ Failed: ${esc(j.error || '')}`}</td></tr>`).join('') || '<tr><td class="muted">None yet.</td></tr>'}</table>
+      <p class="form-error"></p>`;
+    const err = $('.form-error', body);
+    const f = $('#imp-form', body);
+    f.provider.onchange = () => { const other = f.provider.value === 'other'; $$('.imp-host', f).forEach((x) => x.classList.toggle('hidden', !other)); $('#imp-note', body).textContent = presets[f.provider.value]?.note || ''; };
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api('/me/import/imap', { method: 'POST', body: { provider: f.provider.value, host: f.provider.value === 'other' ? f.host.value : undefined, port: Number(f.port.value) || 993, username: f.username.value, password: f.password.value } });
+        toast('Import started. You can keep working.'); openSettings('import');
+      } catch (ex) { err.textContent = ex.message; }
+    };
+    $('#imp-file', body).onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        const b64 = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(',')[1]); r.onerror = reject; r.readAsDataURL(file); });
+        const r = await api('/me/import/file', { method: 'POST', body: { filename: file.name, contentBase64: b64 } });
+        toast(`Imported ${r.imported} message(s)${r.skipped ? `, ${r.skipped} already here` : ''}.`); refresh(true);
+      } catch (ex) { err.textContent = ex.message; }
+    };
+    if (jobs.some((j) => j.status === 'running')) setTimeout(() => { if ($('#imp-form')) openSettings('import'); }, 3000);
+  }
+
   if (tab === 'apps') {
     const [{ appPasswords, servers }, { tokens }, feed] = await Promise.all([api('/me/app-passwords'), api('/me/tokens'), api('/calendar/feed')]);
     const when = (d) => (d ? fmtDate(`${d.replace(' ', 'T')}Z`, true) : 'never');
@@ -1158,57 +1196,6 @@ VIEWS.people = async (pane, q = '') => {
     if (mail) { e.preventDefault(); showMailView(); openComposer('new', null, { prefill: { to: mail.dataset.mailto } }); }
   };
 };
-
-async function openOrgAdmin() {
-  const [{ org }, { users }, { domains }] = await Promise.all([api('/org'), api('/org/users'), api('/org/domains')]);
-  const verified = domains.filter((d) => d.verified);
-  const m = modal(`
-    <h2>${esc(org.name)} · Organization admin</h2>
-    <p class="muted">${users.length} of ${org.max_users || '∞'} users</p>
-    <h3>Users</h3>
-    <table><thead><tr><th>Address</th><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>
-    ${users.map((u) => `<tr><td>${esc(u.email)}</td><td>${esc(u.name)}</td><td>${u.role === 'org_admin' ? 'Admin' : 'User'}</td><td>${u.is_disabled ? 'Disabled' : 'Active'}</td>
-      <td><button class="link-btn" data-u="${u.id}" data-op="${u.is_disabled ? 'enable' : 'disable'}">${u.is_disabled ? 'Enable' : 'Disable'}</button>
-      <button class="link-btn" data-u="${u.id}" data-op="reset">Reset password</button>
-      <button class="link-btn" data-u="${u.id}" data-op="${u.role === 'org_admin' ? 'demote' : 'promote'}">${u.role === 'org_admin' ? 'Make user' : 'Make admin'}</button></td></tr>`).join('')}
-    </tbody></table>
-    <h3>Add user</h3>
-    ${verified.length ? `<form id="add-user" class="row">
-      <label>Name<input name="name" required></label>
-      <label>Username<input name="username" required></label>
-      <label>Domain<select name="domain">${verified.map((d) => `<option>${esc(d.name)}</option>`).join('')}</select></label>
-      <label>Temporary password<input name="password" type="text" minlength="8" required></label>
-      <button class="btn primary">Add</button></form>` : '<p class="muted">Verify a domain below before adding users.</p>'}
-    <h3>Domains</h3>
-    ${domains.map((d) => `<div style="margin-bottom:14px"><strong>${esc(d.name)}</strong> ${d.verified ? '<span class="tag cat">Verified</span>' : `<span class="tag high">Not verified</span> <button class="btn" data-verify="${d.id}">Check DNS</button>`}
-      <table><thead><tr><th>Type</th><th>Host</th><th>Value</th><th>Purpose</th></tr></thead><tbody>${d.dns.map((r) => `<tr><td>${r.type}</td><td><code>${esc(r.host)}</code></td><td><code>${esc(r.value)}</code></td><td>${esc(r.purpose)}</td></tr>`).join('')}</tbody></table></div>`).join('')}
-    <form id="add-domain" class="row"><label>Add a domain<input name="name" placeholder="example.com" required></label><button class="btn">Add domain</button></form>
-    <p class="form-error"></p>
-    <div class="actions"><button class="btn" data-close>Close</button></div>`);
-  const err = $('.form-error', m);
-  m.onclick = async (e) => {
-    const b = e.target.closest('[data-op],[data-verify]');
-    if (!b) return;
-    try {
-      if (b.dataset.verify) { await api(`/org/domains/${b.dataset.verify}/verify`, { method: 'POST', body: {} }); toast('Domain verified.'); return openOrgAdmin(); }
-      const op = b.dataset.op;
-      const body = op === 'disable' ? { is_disabled: true } : op === 'enable' ? { is_disabled: false } : op === 'promote' ? { role: 'org_admin' } : op === 'demote' ? { role: 'user' } : {};
-      if (op === 'reset') { const p = prompt('New temporary password (8+ characters):'); if (!p) return; body.password = p; }
-      await api(`/org/users/${b.dataset.u}`, { method: 'PATCH', body });
-      openOrgAdmin();
-    } catch (ex) { err.textContent = ex.message; }
-  };
-  const au = $('#add-user', m);
-  if (au) au.onsubmit = async (e) => {
-    e.preventDefault();
-    const f = e.target;
-    try { await api('/org/users', { method: 'POST', body: { name: f.name.value, username: f.username.value, domain: f.domain.value, password: f.password.value } }); toast('User added.'); openOrgAdmin(); } catch (ex) { err.textContent = ex.message; }
-  };
-  $('#add-domain', m).onsubmit = async (e) => {
-    e.preventDefault();
-    try { await api('/org/domains', { method: 'POST', body: { name: e.target.name.value } }); openOrgAdmin(); } catch (ex) { err.textContent = ex.message; }
-  };
-}
 
 async function openServiceAdmin() {
   const { orgs } = await api('/admin/orgs');
@@ -1603,6 +1590,225 @@ function editTask(t, pane, listNames) {
   const open = $('#task-mail', f);
   if (open) open.onclick = () => { closeModal(); showMailView(); openMessage(t.message_id); };
 }
+
+// ------------------------------------------------------------ Organization admin center
+const ADMIN_TABS = [['users', 'Users'], ['shared', 'Shared mailboxes'], ['groups', 'Groups'], ['domains', 'Domains'], ['mailflow', 'Mail flow & DLP'],
+  ['trace', 'Message trace'], ['compliance', 'Retention & eDiscovery'], ['audit', 'Audit log'], ['reports', 'Reports']];
+const adminState = { tab: 'users' };
+async function openOrgAdmin() { showView('admin'); }
+
+VIEWS.admin = async (pane, opts = {}) => {
+  if (opts.tab) adminState.tab = opts.tab;
+  const tab = adminState.tab;
+  const [{ org }, { domains }] = await Promise.all([api('/org'), api('/org/domains')]);
+  const verified = domains.filter((d) => d.verified);
+  const domainSelect = verified.length ? `<select name="domain">${verified.map((d) => `<option>${esc(d.name)}</option>`).join('')}</select>` : '';
+  pane.innerHTML = `<h2>${esc(org.name)} · Admin center</h2>
+    <div class="tabbar">${ADMIN_TABS.map(([k, l]) => `<button data-atab="${k}" class="${k === tab ? 'active' : ''}">${l}</button>`).join('')}</div>
+    <div id="admin-body"></div><p class="form-error" id="admin-err"></p>`;
+  $$('[data-atab]', pane).forEach((b) => { b.onclick = () => VIEWS.admin(pane, { tab: b.dataset.atab }); });
+  const body = $('#admin-body', pane);
+  const err = $('#admin-err', pane);
+  const reload = () => VIEWS.admin(pane);
+  const guard = (fn) => async (e) => { if (e?.type === 'submit') e.preventDefault(); err.textContent = ''; try { await fn(e); } catch (ex) { err.textContent = ex.message; } };
+  const when = (t) => (t ? fmtDate(t.includes('T') ? t : `${t.replace(' ', 'T')}Z`, true) : '');
+  const needDomain = '<p class="muted">Verify a domain first (Domains tab).</p>';
+
+  if (tab === 'users') {
+    const { users } = await api('/org/users');
+    body.innerHTML = `<p class="muted">${users.length} of ${org.max_users || '∞'} users</p>
+      <table class="people"><thead><tr><th>Address</th><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>
+      ${users.map((u) => `<tr><td>${esc(u.email)}</td><td>${esc(u.name)}</td><td>${u.role === 'org_admin' ? 'Admin' : 'User'}</td><td>${u.is_disabled ? 'Disabled' : 'Active'}</td>
+        <td><button class="link-btn" data-u="${u.id}" data-op="${u.is_disabled ? 'enable' : 'disable'}">${u.is_disabled ? 'Enable' : 'Disable'}</button>
+        <button class="link-btn" data-u="${u.id}" data-op="reset">Reset password</button>
+        <button class="link-btn" data-u="${u.id}" data-op="${u.role === 'org_admin' ? 'demote' : 'promote'}">${u.role === 'org_admin' ? 'Make user' : 'Make admin'}</button></td></tr>`).join('')}
+      </tbody></table>
+      <h3>Add user</h3>
+      ${verified.length ? `<form id="add-user" class="row"><label>Name<input name="name" required></label><label>Username<input name="username" required></label>
+        <label>Domain${domainSelect}</label><label>Temporary password<input name="password" minlength="8" required></label><button class="btn primary">Add</button></form>` : needDomain}`;
+    body.onclick = guard(async (e) => {
+      const b = e.target.closest('[data-op]');
+      if (!b) return;
+      const op = b.dataset.op;
+      const payload = op === 'disable' ? { is_disabled: true } : op === 'enable' ? { is_disabled: false } : op === 'promote' ? { role: 'org_admin' } : op === 'demote' ? { role: 'user' } : {};
+      if (op === 'reset') { const p = prompt('New temporary password (8+ characters):'); if (!p) return; payload.password = p; }
+      await api(`/org/users/${b.dataset.u}`, { method: 'PATCH', body: payload });
+      reload();
+    });
+    const f = $('#add-user', body);
+    if (f) f.onsubmit = guard(async () => { await api('/org/users', { method: 'POST', body: { name: f.name.value, username: f.username.value, domain: f.domain.value, password: f.password.value } }); toast('User added.'); reload(); });
+  }
+
+  if (tab === 'shared') {
+    const { mailboxes } = await api('/org/shared-mailboxes');
+    const permLabel = { full: 'Full access', send_as: 'Read and send as', send_on_behalf: 'Read and send on behalf', read: 'Read only' };
+    body.innerHTML = `<p class="muted">Shared mailboxes (like info@ or support@) have no password. Members open them from the mailbox list in their sidebar.</p>
+      ${mailboxes.map((b) => `<div class="card-row"><div><strong>${esc(b.name)}</strong> <span class="muted">${esc(b.email)}</span>
+        <div class="small">${b.members.map((m) => `${esc(m.email)} (${permLabel[m.permission]})`).join(', ') || '<span class="muted">No members</span>'}</div></div>
+        <button class="btn" data-members="${b.id}">Members</button></div>`).join('') || '<p class="muted">No shared mailboxes yet.</p>'}
+      <h3>New shared mailbox</h3>
+      ${verified.length ? `<form id="add-shared"><div class="row"><label>Display name<input name="name" placeholder="Acme Support" required></label><label>Address<input name="username" placeholder="support" required></label><label>Domain${domainSelect}</label></div>
+        <label>Members (one per line: email, and optionally full / send_as / send_on_behalf / read)<textarea name="members" rows="3" placeholder="ann@${esc(verified[0].name)} send_as"></textarea></label>
+        <button class="btn primary">Create</button></form>` : needDomain}`;
+    const parse = (t) => t.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { const [email, permission] = l.split(/[\s,]+/); return { email, permission: permission || 'full' }; });
+    const f = $('#add-shared', body);
+    if (f) f.onsubmit = guard(async () => { await api('/org/shared-mailboxes', { method: 'POST', body: { name: f.name.value, username: f.username.value, domain: f.domain.value, members: parse(f.members.value) } }); toast('Shared mailbox created.'); reload(); });
+    body.onclick = guard(async (e) => {
+      const b = e.target.closest('[data-members]');
+      if (!b) return;
+      const box = mailboxes.find((x) => x.id === Number(b.dataset.members));
+      const v = prompt(`Members of ${box.email}, one per line as "email permission" (full, send_as, send_on_behalf, read). Separate with ; here:`, box.members.map((m) => `${m.email} ${m.permission}`).join('; '));
+      if (v === null) return;
+      await api(`/org/shared-mailboxes/${box.id}/members`, { method: 'PUT', body: { members: parse(v.replace(/;/g, '\n')) } });
+      reload();
+    });
+  }
+
+  if (tab === 'groups') {
+    const { groups } = await api('/org/groups');
+    body.innerHTML = `<p class="muted">Mail sent to a group address goes to every member.</p>
+      ${groups.map((g) => `<div class="card-row"><div><strong>${esc(g.name)}</strong> <span class="muted">${esc(g.address)}</span> ${g.allow_external ? '<span class="tag">Accepts outside mail</span>' : ''}
+        <div class="small">${g.members.map((m) => esc(m.email)).join(', ') || '<span class="muted">No members</span>'}</div></div>
+        <div><button class="btn" data-gedit="${g.id}">Edit members</button> <button class="btn" data-gext="${g.id}">${g.allow_external ? 'Internal only' : 'Allow outside senders'}</button> <button class="btn danger" data-gdel="${g.id}">Delete</button></div></div>`).join('') || '<p class="muted">No groups yet.</p>'}
+      <h3>New group</h3>
+      ${verified.length ? `<form id="add-group"><div class="row"><label>Name<input name="name" placeholder="Sales team" required></label><label>Address<input name="username" placeholder="sales" required></label><label>Domain${domainSelect}</label></div>
+        <label>Members (comma separated emails)<input name="members" required></label><label class="check"><input type="checkbox" name="allow_external"> People outside the organization can email this group</label>
+        <button class="btn primary">Create</button></form>` : needDomain}`;
+    const split = (v) => v.split(/[,;\s]+/).filter(Boolean);
+    const f = $('#add-group', body);
+    if (f) f.onsubmit = guard(async () => { await api('/org/groups', { method: 'POST', body: { name: f.name.value, username: f.username.value, domain: f.domain.value, members: split(f.members.value), allow_external: f.allow_external.checked } }); toast('Group created.'); reload(); });
+    body.onclick = guard(async (e) => {
+      const ed = e.target.closest('[data-gedit]');
+      const ext = e.target.closest('[data-gext]');
+      const del = e.target.closest('[data-gdel]');
+      const g = groups.find((x) => x.id === Number((ed || ext || del)?.dataset.gedit || (ed || ext || del)?.dataset.gext || (ed || ext || del)?.dataset.gdel));
+      if (!g) return;
+      if (ed) { const v = prompt(`Members of ${g.address} (comma separated):`, g.members.map((m) => m.email).join(', ')); if (v === null) return; await api(`/org/groups/${g.id}`, { method: 'PUT', body: { members: split(v) } }); }
+      if (ext) await api(`/org/groups/${g.id}`, { method: 'PUT', body: { allow_external: !g.allow_external } });
+      if (del) { if (!confirm(`Delete ${g.address}?`)) return; await api(`/org/groups/${g.id}`, { method: 'DELETE' }); }
+      reload();
+    });
+  }
+
+  if (tab === 'domains') {
+    body.innerHTML = `${domains.map((d) => `<div style="margin-bottom:14px"><strong>${esc(d.name)}</strong> ${d.verified ? '<span class="tag cat">Verified</span>' : `<span class="tag high">Not verified</span> <button class="btn" data-verify="${d.id}">Check DNS</button>`}
+      <table><thead><tr><th>Type</th><th>Host</th><th>Value</th><th>Purpose</th></tr></thead><tbody>${d.dns.map((r) => `<tr><td>${r.type}</td><td><code>${esc(r.host)}</code></td><td><code class="wrap">${esc(r.value)}</code></td><td>${esc(r.purpose)}</td></tr>`).join('')}</tbody></table></div>`).join('')}
+      <form id="add-domain" class="row"><label>Add a domain<input name="name" placeholder="example.com" required></label><button class="btn">Add domain</button></form>`;
+    body.onclick = guard(async (e) => { const b = e.target.closest('[data-verify]'); if (!b) return; await api(`/org/domains/${b.dataset.verify}/verify`, { method: 'POST', body: {} }); toast('Domain verified.'); reload(); });
+    $('#add-domain', body).onsubmit = guard(async (e) => { await api('/org/domains', { method: 'POST', body: { name: e.target.name.value } }); reload(); });
+  }
+
+  if (tab === 'mailflow') {
+    const [{ rules }, { types }] = await Promise.all([api('/org/transport-rules'), api('/org/sensitive-types')]);
+    const label = Object.fromEntries(types.map((t) => [t.id, t.label]));
+    const desc = (r) => {
+      const c = [];
+      if (r.match.externalRecipients) c.push('sent outside the organization');
+      if (r.match.recipientDomain) c.push(`sent to @${r.match.recipientDomain}`);
+      if (r.match.subjectContains) c.push(`subject contains "${r.match.subjectContains}"`);
+      if (r.match.bodyContains) c.push(`body contains "${r.match.bodyContains}"`);
+      if (r.match.sensitiveInfo?.length) c.push(`contains ${r.match.sensitiveInfo.map((k) => label[k] || k).join(' or ')}`);
+      const a = r.action === 'block' ? 'block it' : r.action === 'bcc' ? `send a copy to ${r.value}` : 'add the disclaimer';
+      return `If ${c.join(' and ') || 'any message'}: ${a}`;
+    };
+    body.innerHTML = `<p class="muted">Rules run on every message your people send, from the web, mail apps and AI agents. Data loss prevention (DLP) rules look for sensitive information such as card numbers.</p>
+      ${rules.map((r) => `<div class="card-row"><div><strong>${esc(r.name)}</strong> ${r.enabled ? '' : '<span class="tag">Off</span>'}<div class="small">${esc(desc(r))}</div></div>
+        <div><button class="btn" data-rtoggle="${r.id}">${r.enabled ? 'Turn off' : 'Turn on'}</button> <button class="btn danger" data-rdel="${r.id}">Delete</button></div></div>`).join('') || '<p class="muted">No rules yet.</p>'}
+      <h3>New rule</h3>
+      <form id="add-rule">
+        <label>Name<input name="name" placeholder="Block card numbers going outside" required></label>
+        <fieldset><legend>When a message…</legend>
+          <label class="check"><input type="checkbox" name="externalRecipients"> is sent to someone outside the organization</label>
+          <div class="row"><label>Recipient domain is<input name="recipientDomain" placeholder="competitor.com"></label><label>Subject contains<input name="subjectContains"></label><label>Body contains<input name="bodyContains"></label></div>
+          <div class="muted small">Contains sensitive information (DLP):</div>
+          <div class="row">${types.map((t) => `<label class="check"><input type="checkbox" name="si" value="${t.id}"> ${esc(t.label)}</label>`).join('')}</div>
+        </fieldset>
+        <div class="row"><label>Then<select name="action"><option value="block">Block the message</option><option value="bcc">Send a copy (Bcc) to</option><option value="disclaimer">Add a disclaimer</option></select></label>
+        <label>Block message / copy address / disclaimer text<input name="value"></label></div>
+        <button class="btn primary">Create rule</button></form>`;
+    const f = $('#add-rule', body);
+    f.onsubmit = guard(async () => {
+      await api('/org/transport-rules', { method: 'POST', body: { name: f.name.value, action: f.action.value, value: f.value.value,
+        match: { externalRecipients: f.externalRecipients.checked, recipientDomain: f.recipientDomain.value, subjectContains: f.subjectContains.value, bodyContains: f.bodyContains.value, sensitiveInfo: $$('[name=si]:checked', f).map((x) => x.value) } } });
+      toast('Rule created.'); reload();
+    });
+    body.onclick = guard(async (e) => {
+      const t = e.target.closest('[data-rtoggle]');
+      const d = e.target.closest('[data-rdel]');
+      if (t) { const r = rules.find((x) => x.id === Number(t.dataset.rtoggle)); await api(`/org/transport-rules/${r.id}`, { method: 'PUT', body: { ...r, enabled: !r.enabled } }); reload(); }
+      if (d && confirm('Delete this rule?')) { await api(`/org/transport-rules/${d.dataset.rdel}`, { method: 'DELETE' }); reload(); }
+    });
+  }
+
+  if (tab === 'trace') {
+    body.innerHTML = `<form id="trace-form" class="row"><label>Sender, recipient or subject<input name="q" value="${esc(opts.q || '')}"></label>
+      <label>Period<select name="days">${[1, 7, 30, 90].map((d) => `<option value="${d}" ${(opts.days || 7) === d ? 'selected' : ''}>Last ${d} day${d > 1 ? 's' : ''}</option>`).join('')}</select></label><button class="btn primary">Search</button></form>
+      <div id="trace-out" class="muted">Loading…</div>`;
+    const run = async (q = '', days = 7) => {
+      const { trace } = await api(`/org/message-trace?q=${encodeURIComponent(q)}&days=${days}`);
+      $('#trace-out', body).innerHTML = trace.length ? `<table class="people"><thead><tr><th>Time</th><th>Direction</th><th>From</th><th>To</th><th>Subject</th><th>Status</th></tr></thead><tbody>
+        ${trace.map((t) => `<tr><td class="small">${esc(when(t.time))}</td><td>${esc(t.direction)}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td>${esc(t.subject)}</td><td title="${esc(t.detail || '')}">${esc(t.status)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No messages found.</p>';
+    };
+    $('#trace-form', body).onsubmit = guard((e) => run(e.target.q.value, e.target.days.value));
+    run();
+  }
+
+  if (tab === 'compliance') {
+    const c = await api('/org/compliance');
+    body.innerHTML = `<h3>Retention</h3>
+      <form id="ret-form" class="row"><label>Delete mail older than<select name="retention_days">${[[0, 'Keep forever'], [90, '90 days'], [365, '1 year'], [730, '2 years'], [1825, '5 years'], [2555, '7 years']].map(([v, l]) => `<option value="${v}" ${c.retention_days === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label><button class="btn">Save</button></form>
+      <h3>Litigation hold</h3>
+      <p>${c.litigation_hold ? '<span class="tag high">On</span> Nothing in this organization is permanently deleted. Mail people delete is kept, hidden, for eDiscovery. Retention is paused.' : '<span class="tag">Off</span> Turn on to preserve all mail during a legal matter or investigation.'}</p>
+      <button class="btn ${c.litigation_hold ? '' : 'danger'}" id="hold-btn">${c.litigation_hold ? 'Release hold' : 'Place organization on hold'}</button>
+      <h3>eDiscovery search</h3>
+      <form id="ed-form"><div class="row"><label>Keywords<input name="q" placeholder="invoice Globex"></label><label>Mailbox (optional)<input name="mailbox" placeholder="name@${esc(verified[0]?.name || 'example.com')}"></label>
+        <label>From<input type="date" name="from"></label><label>To<input type="date" name="to"></label></div>
+        <button class="btn primary">Search all mailboxes</button> <button class="btn" type="button" id="ed-export">Export results (.mbox)</button></form>
+      <div id="ed-out"></div><p class="muted small">Every search and export is recorded in the audit log.</p>`;
+    $('#ret-form', body).onsubmit = guard(async (e) => { await api('/org/compliance', { method: 'PATCH', body: { retention_days: Number(e.target.retention_days.value) } }); toast('Retention saved.'); });
+    $('#hold-btn', body).onclick = guard(async () => {
+      if (!confirm(c.litigation_hold ? 'Release the litigation hold? Deleted mail can then be purged.' : 'Place the whole organization on litigation hold?')) return;
+      await api('/org/compliance', { method: 'PATCH', body: { litigation_hold: !c.litigation_hold } }); reload();
+    });
+    const crit = () => { const f = $('#ed-form', body); return { q: f.q.value, mailbox: f.mailbox.value || undefined, from: f.from.value || undefined, to: f.to.value ? `${f.to.value}T23:59:59` : undefined }; };
+    $('#ed-form', body).onsubmit = guard(async () => {
+      const r = await api('/org/ediscovery/search', { method: 'POST', body: crit() });
+      $('#ed-out', body).innerHTML = `<p>${r.count} item(s)${r.count > 200 ? ', showing the first 200' : ''}.</p><table class="people"><thead><tr><th>Mailbox</th><th>From</th><th>Subject</th><th>Date</th><th></th></tr></thead><tbody>
+        ${r.results.map((x) => `<tr><td>${esc(x.mailbox)}</td><td>${esc(x.from)}</td><td>${esc(x.subject)}</td><td class="small">${esc(fmtDate(x.date))}</td><td>${x.held ? '<span class="tag high">Deleted, held</span>' : x.deleted ? '<span class="tag">Deleted Items</span>' : ''}</td></tr>`).join('')}</tbody></table>`;
+    });
+    $('#ed-export', body).onclick = guard(async () => {
+      const res = await fetch('/api/org/ediscovery/export', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(crit()) });
+      if (!res.ok) throw new Error((await res.json()).error);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(await res.blob());
+      a.download = `ediscovery-${new Date().toISOString().slice(0, 10)}.mbox`;
+      a.click();
+    });
+  }
+
+  if (tab === 'audit') {
+    body.innerHTML = `<form id="audit-form" class="row"><label>Activity<select name="action"><option value="">All</option><option value="admin.">Admin changes</option><option value="security.">Security</option><option value="imap.">Mail app sign-ins</option><option value="mail.sent">Mail sent</option><option value="mailflow.">Mail flow rule matches</option><option value="import.">Imports</option></select></label>
+      <label>User<input name="user" placeholder="name@domain"></label><button class="btn primary">Filter</button></form><div id="audit-out"></div>`;
+    const run = async (action = '', user = '') => {
+      const { entries } = await api(`/org/audit?action=${encodeURIComponent(action)}&user=${encodeURIComponent(user)}`);
+      $('#audit-out', body).innerHTML = `<table class="people"><thead><tr><th>Time</th><th>User</th><th>Activity</th><th>Details</th></tr></thead><tbody>
+        ${entries.map((e) => `<tr><td class="small">${esc(when(e.created_at))}</td><td>${esc(e.user_email || '')}</td><td><code>${esc(e.action)}</code></td><td class="small"><code class="wrap">${esc(JSON.stringify(e.details)).slice(0, 300)}</code></td></tr>`).join('') || '<tr><td colspan="4" class="muted">Nothing yet.</td></tr>'}</tbody></table>`;
+    };
+    $('#audit-form', body).onsubmit = guard((e) => run(e.target.action.value, e.target.user.value));
+    run();
+  }
+
+  if (tab === 'reports') {
+    const r = await api('/org/reports');
+    const people = r.users.filter((u) => u.mailbox_type !== 'shared');
+    body.innerHTML = `<div class="stats">
+        <div><b>${r.sent7d}</b><span>sent, last 7 days</span></div><div><b>${r.received7d}</b><span>received</span></div>
+        <div><b>${r.junk7d}</b><span>caught as junk</span></div><div><b>${r.failed7d}</b><span>failed deliveries</span></div>
+        <div><b>${r.mfaUsers} / ${people.length}</b><span>users with two-step verification</span></div></div>
+      <h3>Mailbox usage</h3><table class="people"><thead><tr><th>Mailbox</th><th>Type</th><th>Used</th><th>Two-step</th><th>Last activity</th></tr></thead><tbody>
+      ${r.users.map((u) => `<tr><td>${esc(u.email)}</td><td>${u.mailbox_type === 'shared' ? 'Shared' : 'User'}${u.is_disabled ? ' (disabled)' : ''}</td><td>${fmtBytes(u.bytes)} <span class="muted small">(${((u.bytes / r.quotaBytes) * 100).toFixed(1)}%)</span></td><td>${u.mailbox_type === 'shared' ? '' : u.totp_enabled ? '✔' : '<span class="overdue">Off</span>'}</td><td class="small">${esc(when(u.last_activity))}</td></tr>`).join('')}</tbody></table>`;
+  }
+};
 
 document.addEventListener('keydown', (e) => {
   if (!state.me || e.target.matches('input, textarea, select') || !$('#modal').classList.contains('hidden')) return;

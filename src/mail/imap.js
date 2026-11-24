@@ -259,7 +259,7 @@ function flagsOf(r, role) {
 function folderForName(userId, name) {
   const n = decodeMailbox(name);
   if (n.toUpperCase() === 'INBOX') return store.folderByRole(userId, 'inbox');
-  return db.prepare('SELECT * FROM folders WHERE user_id = ? AND name = ? AND (role IS NULL OR role != ?)').get(userId, n, 'inbox');
+  return db.prepare('SELECT * FROM folders WHERE user_id = ? AND name = ? AND (role IS NULL OR role NOT IN (?, ?))').get(userId, n, 'inbox', 'recoverable');
 }
 const nameOf = (f) => (f.role === 'inbox' ? 'INBOX' : encodeMailbox(f.name));
 

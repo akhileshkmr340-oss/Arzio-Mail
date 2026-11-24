@@ -23,7 +23,7 @@ export function listFolders(userId) {
     SELECT f.id, f.name, f.role,
       (SELECT COUNT(*) FROM messages m WHERE m.folder_id = f.id AND m.is_read = 0) AS unread,
       (SELECT COUNT(*) FROM messages m WHERE m.folder_id = f.id) AS total
-    FROM folders f WHERE f.user_id = ?
+    FROM folders f WHERE f.user_id = ? AND (f.role IS NULL OR f.role != 'recoverable')
     ORDER BY CASE f.role WHEN 'inbox' THEN 1 WHEN 'drafts' THEN 2 WHEN 'sent' THEN 3 WHEN 'archive' THEN 4
       WHEN 'junk' THEN 5 WHEN 'trash' THEN 6 ELSE 7 END, f.name`).all(userId);
 }
@@ -154,6 +154,18 @@ function hydrate(row) {
   return out;
 }
 
+// Mail kept for litigation hold lives in a hidden "Recoverable Items" folder
+const NOT_HELD = "m.folder_id NOT IN (SELECT id FROM folders WHERE user_id = m.user_id AND role = 'recoverable')";
+
+export function recoverableFolder(userId) {
+  let f = folderByRole(userId, 'recoverable');
+  if (!f) {
+    db.prepare("INSERT OR IGNORE INTO folders (user_id, name, role) VALUES (?, 'Recoverable Items (hold)', 'recoverable')").run(userId);
+    f = folderByRole(userId, 'recoverable');
+  }
+  return f;
+}
+
 export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 0, flagged, snoozed, category, unread }) {
   const where = ['m.user_id = ?'];
   const args = [userId];
@@ -164,7 +176,7 @@ export function listMessages(userId, { folderId, focus, q, limit = 50, offset = 
     where.push('messages_fts MATCH ?');
     args.push(ftsQuery(q));
   }
-  if (folderId) { where.push('m.folder_id = ?'); args.push(Number(folderId)); }
+  if (folderId) { where.push('m.folder_id = ?'); args.push(Number(folderId)); } else where.push(NOT_HELD);
   if (flagged) where.push('m.is_flagged = 1');
   if (snoozed) where.push('m.snooze_until IS NOT NULL');
   else where.push('m.snooze_until IS NULL');
@@ -202,7 +214,7 @@ export function getMessage(userId, id) {
 }
 
 export function getThread(userId, threadId) {
-  return db.prepare('SELECT * FROM messages WHERE user_id = ? AND thread_id = ? ORDER BY date ASC').all(userId, threadId).map(hydrate);
+  return db.prepare(`SELECT * FROM messages m WHERE user_id = ? AND thread_id = ? AND ${NOT_HELD} ORDER BY date ASC`).all(userId, threadId).map(hydrate);
 }
 
 export function getAttachment(userId, attId) {
@@ -240,8 +252,18 @@ export function deleteMessage(userId, id) {
   return true;
 }
 
-/** Remove a message, its search entry and its files for good. */
-export function purgeMessage(id) {
+/**
+ * Remove a message, its search entry and its files for good. When the owner's
+ * organization is on litigation hold the message is kept, hidden, for eDiscovery.
+ */
+export function purgeMessage(id, { force = false } = {}) {
+  if (!force) {
+    const hold = db.prepare('SELECT m.user_id FROM messages m JOIN users u ON u.id = m.user_id JOIN organizations o ON o.id = u.org_id WHERE m.id = ? AND o.litigation_hold = 1').get(id);
+    if (hold) {
+      db.prepare('UPDATE messages SET folder_id = ? WHERE id = ?').run(recoverableFolder(hold.user_id).id, id);
+      return;
+    }
+  }
   const atts = db.prepare('SELECT storage_path FROM attachments WHERE message_id = ?').all(id);
   const m = db.prepare('SELECT raw_path FROM messages WHERE id = ?').get(id);
   tx(() => {
@@ -271,7 +293,7 @@ export function searchForQuestion(userId, question, limit = 12) {
   if (!terms.length) return [];
   const q = terms.map((t) => `"${t.replace(/"/g, '')}"*`).join(' OR ');
   return db.prepare(`SELECT m.* FROM messages_fts f JOIN messages m ON m.id = f.rowid
-    WHERE messages_fts MATCH ? AND m.user_id = ? ORDER BY bm25(messages_fts), m.date DESC LIMIT ?`).all(q, userId, limit).map(hydrate);
+    WHERE messages_fts MATCH ? AND m.user_id = ? AND ${NOT_HELD} ORDER BY bm25(messages_fts), m.date DESC LIMIT ?`).all(q, userId, limit).map(hydrate);
 }
 
 /** Save the original MIME for a message that has none yet (used by IMAP). */
