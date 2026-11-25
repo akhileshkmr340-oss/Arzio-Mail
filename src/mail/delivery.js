@@ -303,6 +303,13 @@ export async function sendMail(user, input) {
   if (all.length > 100) throw httpErr(400, 'Too many recipients (max 100).');
   if (sentToday(user.id) >= sendLimit(user.id)) throw httpErr(429, 'Daily sending limit reached for your plan.');
   if (input.from && !sendIdentities(user).some((i) => i.address === String(input.from).toLowerCase())) throw httpErr(403, 'You are not allowed to send from that address.');
+  // The public demo has no real domain or sending service, so say so instead of
+  // pretending that mail to Gmail and other outside addresses went out.
+  if (config.demo) {
+    const outside = [];
+    for (const r of all) if (!(await isLocalDomain(domainOf(r.address)))) outside.push(r.address);
+    if (outside.length) throw httpErr(400, `The demo can only send to addresses ending in @${config.primaryDomain}, so ${outside.join(', ')} would not receive it. Sending to Gmail and other outside addresses works once Arzio has its own domain and a sending service.`);
+  }
 
   let sendAt;
   let scheduled = false;
