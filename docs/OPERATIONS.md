@@ -93,6 +93,22 @@ These run inside the server, with nothing to schedule:
   organization retention, clears expired sessions and old queue rows. Nothing
   is deleted while an organization is on litigation hold.
 
+## Connected accounts
+
+Users can connect a mailbox that stays at another provider (for example a
+Hostinger business email such as enquiry@yourcompany.com) under **Settings >
+Connected accounts**. Arzio checks each one for new mail every
+`ARZIO_CONNECTED_SYNC_MINUTES` (default 3) and sends mail "From" it through the
+provider's own SMTP server, so SPF and DKIM keep passing with no DNS change.
+
+- The server needs outbound access to the provider's IMAP (993) and SMTP
+  (465 or 587) ports. Some free hosts block outbound SMTP.
+- Passwords are encrypted with `ARZIO_SECRET_KEY`, or with `data/secret.key`
+  when that is not set. Backups don't include the key: keep it somewhere safe,
+  or users re-enter the password (**Update password**) after a restore.
+- With several servers, set the same `ARZIO_SECRET_KEY` on all of them.
+- Disconnecting keeps the mail already copied.
+
 ## Phones (Exchange ActiveSync)
 
 Phones keep one request open to `/Microsoft-Server-ActiveSync` for push and

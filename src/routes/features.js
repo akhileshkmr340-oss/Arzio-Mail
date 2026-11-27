@@ -10,6 +10,7 @@ import { generateSecret, verifyTotp, otpauthUri } from '../mfa.js';
 import * as store from '../mail/store.js';
 import { validateRule, listRules, applyRules, suggestContacts, setSenderList } from '../mail/features.js';
 import { cancelQueued, listScheduled, sendIdentities } from '../mail/delivery.js';
+import * as connected from '../mail/connected.js';
 import * as ai from '../ai/index.js';
 import { audit } from '../audit.js';
 
@@ -197,6 +198,17 @@ features.delete('/me/aliases/:id', (req, res) => {
   res.json({ ok: true });
 });
 features.get('/me/identities', (req, res) => res.json({ identities: sendIdentities(req.user) }));
+
+// ------------------------------------------------------------ connected accounts (mailboxes at other providers)
+const noTokens = (req) => { if (req.tokenScopes) throw httpError(403, 'API tokens cannot manage connected accounts.'); };
+features.get('/me/connected', (req, res) => res.json({ accounts: connected.listAccounts(req.user.id), providers: connected.PROVIDERS, demo: !!config.demo }));
+features.post('/me/connected', wrap(async (req, res) => { noTokens(req); res.status(201).json({ account: await connected.addAccount(req.user, req.body || {}) }); }));
+features.patch('/me/connected/:id', wrap(async (req, res) => { noTokens(req); res.json({ account: connected.updateAccount(req.user, req.params.id, req.body || {}) }); }));
+features.delete('/me/connected/:id', wrap(async (req, res) => { noTokens(req); connected.removeAccount(req.user, req.params.id); res.json({ ok: true }); }));
+features.post('/me/connected/:id/sync', wrap(async (req, res) => {
+  if (!connected.listAccounts(req.user.id).some((a) => a.id === Number(req.params.id))) throw httpError(404, 'Account not found.');
+  res.json(await connected.syncAccount(Number(req.params.id)));
+}));
 
 // ------------------------------------------------------------ delegation and shared mailboxes
 // Mailboxes I can open (shared mailboxes and people who delegated to me)

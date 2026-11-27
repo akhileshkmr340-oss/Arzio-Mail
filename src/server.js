@@ -16,6 +16,7 @@ import { startSubmission } from './mail/smtp-submission.js';
 import { startInboundSmtp } from './mail/smtp-inbound.js';
 import { aiInfo } from './ai/index.js';
 import { startWorkers } from './mail/delivery.js';
+import { startConnectedSync } from './mail/connected.js';
 import { startMaintenance } from './maintenance.js';
 import { seedDemo, demoGuard } from './demo.js';
 
@@ -77,7 +78,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (config.imap.enabled) servers.push(['imap', startImap()]);
   if (config.submission.enabled) servers.push(['submission', startSubmission()]);
   if (config.demo) seedDemo().catch((e) => console.error('[demo] seeding failed', e));
-  const timers = [startWorkers(), startMaintenance()];
+  const timers = [startWorkers(), startMaintenance(), startConnectedSync()];
 
   // Graceful shutdown: stop taking new connections, let open requests finish,
   // then close the database cleanly. Hard exit after 15 seconds.
