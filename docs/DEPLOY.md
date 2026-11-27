@@ -161,3 +161,27 @@ sign in with GitHub and press Apply. `render.yaml` sets everything. Add an
 `ANTHROPIC_API_KEY` there for real AI; without it the built-in basic AI is used.
 The free plan sleeps after 15 minutes idle (the first visit then takes about a
 minute) and the demo resets on every restart.
+
+## Free private server on Google Cloud (e2-micro)
+
+For one person or a small team that keeps its mail at another provider (for
+example a Hostinger business email) and uses Arzio through **Settings >
+Connected accounts**. No DNS change is needed.
+
+1. In the Google Cloud console, open **Compute Engine > VM instances > Create
+   instance**. Region `us-central1`, `us-west1` or `us-east1` (the free tier
+   only covers these), machine type **e2-micro**, boot disk **Debian 12**,
+   **Standard persistent disk**, 30 GB.
+2. Under **Firewall**, tick **Allow HTTP traffic** and **Allow HTTPS traffic**.
+3. Under **Advanced options > Management > Automation**, paste as the startup
+   script:
+   `curl -fsSL https://raw.githubusercontent.com/akhileshkmr340-oss/Arzio-Mail/main/deploy/gcp/startup.sh | bash`
+4. Create the VM and wait about 5 minutes, then open `http://<external IP>`. It
+   redirects to `https://<ip-with-dashes>.sslip.io`. Sign up straight away:
+   sign-up closes after the first account (`ARZIO_SIGNUP_MAX_USERS=1`).
+
+Settings live in `/opt/arzio/arzio.env` and data in `/opt/arzio/data`. Rebooting
+the VM pulls the latest code. The setup log is `/var/log/arzio-setup.log`. If
+you stop and start the VM, its IP (and so the sslip.io address) can change;
+reserve a static IP to keep it. Google blocks outgoing port 25 here, which
+doesn't matter for connected accounts (they use 993 and 465).

@@ -639,7 +639,9 @@ function openComposer(mode, m, opts = {}) {
     c.quoteText = quote(m);
     c.inReplyTo = m.message_id;
     c.references = [m.refs, m.message_id].filter(Boolean).join(' ');
+    c.sentTo = [...(m.to || []), ...(m.cc || [])].map((p) => p.address);
   } else if (m && mode === 'forward') {
+    c.sentTo = [...(m.to || []), ...(m.cc || [])].map((p) => p.address);
     c.subject = /^fw[d]?:/i.test(m.subject) ? m.subject : `Fw: ${m.subject}`;
     c.quoteHtml = quoteHtml(m, true);
     c.quoteText = `\n\n\n---------- Forwarded message ----------\nFrom: ${fmtAddr({ name: m.from_name, address: m.from_addr })}\nDate: ${fmtDate(m.date, true)}\nSubject: ${m.subject}\nTo: ${people(m.to)}\n\n${m.text_body || ''}`;
@@ -977,7 +979,8 @@ async function loadIdentities(c) {
   try {
     if (!state.identities) state.identities = (await api('/me/identities')).identities;
     const ids = state.identities;
-    const def = c.from || (state.mailbox ? state.mailbox.email : state.me.email);
+    // Replying to mail that came to a connected account or alias: answer from that address
+    const def = c.from || ids.find((i) => c.sentTo?.includes(i.address) && i.address !== state.me.email)?.address || (state.mailbox ? state.mailbox.email : state.me.email);
     if (ids.length > 1) {
       $('.from-row').classList.remove('hidden');
       $('#c-from').innerHTML = ids.map((i) => `<option value="${esc(i.address)}" ${i.address === def ? 'selected' : ''}>${esc(i.name)} &lt;${esc(i.address)}&gt;${i.onBehalf ? ' (on behalf)' : ''}</option>`).join('');
@@ -1188,7 +1191,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#mod
 // ------------------------------------------------------------ settings (tabbed)
 const SETTINGS_TABS = [
   ['general', 'General'], ['appearance', 'Appearance & layout'], ['ooo', 'Automatic replies'], ['rules', 'Rules'], ['junk', 'Junk email'],
-  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['security', 'Security'], ['apps', 'Phones, mail apps & AI agents'], ['import', 'Import mail'], ['billing', 'Plan & billing'],
+  ['templates', 'Templates'], ['accounts', 'Addresses & sharing'], ['connected', 'Connected accounts'], ['security', 'Security'], ['apps', 'Phones, mail apps & AI agents'], ['import', 'Import mail'], ['billing', 'Plan & billing'],
 ];
 
 async function openSettings(tab = 'general', ruleSeed = null) {
@@ -1362,6 +1365,51 @@ async function openSettings(tab = 'general', ruleSeed = null) {
       ${o.subscription && !o.subscription.cancelAtPeriodEnd && o.subscription.provider !== 'manual' ? '<p><button class="link-btn" data-cancel-plan>Cancel plan</button></p>' : ''}
       <h3>Invoices</h3>${invoiceTable(o.invoices)}<p class="form-error"></p>`;
     wirePlans(body, o, { business: false, base: '/billing', onDone: () => openSettings('billing'), err: $('.form-error', body) });
+  }
+
+  if (tab === 'connected') {
+    const { accounts, providers, demo } = await api('/me/connected');
+    const ago = (t) => (t ? fmtDate(`${t.replace(' ', 'T')}Z`, true) : 'not yet');
+    body.innerHTML = `<h3>Mailboxes at other providers</h3>
+      <p class="muted">Use a mailbox hosted somewhere else, such as a Hostinger business email, from inside ${esc(state.service?.name || 'Arzio Mail')}. New mail is copied into its own folder every few minutes, and you can pick it as the From address. Mail sent from it goes through that provider, so your domain's DNS stays as it is.</p>
+      ${accounts.map((a) => `<div class="rule-row"><strong>${esc(a.display_name || a.address)}</strong> &lt;${esc(a.address)}&gt;
+        <div class="small ${a.status === 'error' ? 'form-error' : 'muted'}">${a.status === 'error' ? `✖ ${esc(a.last_error || 'Sync failed')}` : `✔ Last checked ${esc(ago(a.last_sync_at))} · ${a.imported} message(s) copied`} · ${esc(a.imap_host)} / ${esc(a.smtp_host)}</div>
+        <button class="link-btn" data-sync="${a.id}">Check now</button> <button class="link-btn" data-repass="${a.id}">Update password</button> <button class="link-btn" data-disconnect="${a.id}">Disconnect</button></div>`).join('') || '<p class="muted small">No connected accounts yet.</p>'}
+      ${demo ? '<p class="muted">The public demo is one shared account, so connecting a real mailbox is turned off here.</p>' : `<h3>Connect an account</h3>
+      <form id="conn-form"><div class="row"><label>Provider<select name="provider">${Object.entries(providers).map(([k, p]) => `<option value="${k}">${esc(p.name)}</option>`).join('')}<option value="other">Other (IMAP and SMTP)</option></select></label></div>
+        <p class="muted small" id="conn-note">${esc(Object.values(providers)[0]?.note || '')}</p>
+        <div class="row conn-other hidden"><label>IMAP server<input name="imapHost" placeholder="imap.example.com"></label><label>Port<input name="imapPort" value="993" style="width:80px"></label>
+          <label>SMTP server<input name="smtpHost" placeholder="smtp.example.com"></label><label>Port<input name="smtpPort" value="465" style="width:80px"></label></div>
+        <div class="row"><label>Email address<input name="address" type="email" required placeholder="enquiry@yourcompany.com"></label><label>Name shown to people<input name="name" value="${esc(u.name || '')}"></label></div>
+        <div class="row"><label>Password<input name="password" type="password" required autocomplete="new-password"></label><label class="conn-other hidden">Username (if not the address)<input name="username"></label></div>
+        <button class="btn primary">Connect</button></form>`}
+      <p class="form-error"></p>`;
+    const err = $('.form-error', body);
+    body.onclick = async (e) => {
+      const b = e.target.closest('[data-sync],[data-disconnect],[data-repass]');
+      if (!b) return;
+      try {
+        if (b.dataset.sync) { b.textContent = 'Checking…'; const r = await api(`/me/connected/${b.dataset.sync}/sync`, { method: 'POST', body: {} }); toast(r.imported ? `${r.imported} new message(s).` : 'No new mail.'); refresh(true); }
+        if (b.dataset.repass) { const pw = prompt('New password for this account'); if (!pw) return; await api(`/me/connected/${b.dataset.repass}`, { method: 'PATCH', body: { password: pw } }); toast('Password updated.'); }
+        if (b.dataset.disconnect) { if (!confirm('Disconnect this account? Mail already copied stays in its folder.')) return; await api(`/me/connected/${b.dataset.disconnect}`, { method: 'DELETE' }); state.identities = null; }
+        openSettings('connected');
+      } catch (ex) { err.textContent = ex.message; }
+    };
+    const f = $('#conn-form', body);
+    if (f) {
+      f.provider.onchange = () => { const other = f.provider.value === 'other'; $$('.conn-other', f).forEach((x) => x.classList.toggle('hidden', !other)); $('#conn-note', body).textContent = providers[f.provider.value]?.note || ''; };
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        const btn = $('button.primary', f);
+        btn.disabled = true; btn.textContent = 'Signing in…'; err.textContent = '';
+        const other = f.provider.value === 'other';
+        try {
+          await api('/me/connected', { method: 'POST', body: { provider: f.provider.value, address: f.address.value, name: f.name.value, password: f.password.value,
+            ...(other ? { imapHost: f.imapHost.value, imapPort: Number(f.imapPort.value) || 993, imapSecure: Number(f.imapPort.value || 993) !== 143, smtpHost: f.smtpHost.value, smtpPort: Number(f.smtpPort.value) || 465, smtpSecure: Number(f.smtpPort.value || 465) === 465, username: f.username.value || undefined } : {}) } });
+          toast(`${f.address.value} is connected.`); state.identities = null; refresh(true); openSettings('connected');
+        } catch (ex) { err.textContent = ex.message; btn.disabled = false; btn.textContent = 'Connect'; }
+      };
+    }
   }
 
   if (tab === 'import') {

@@ -42,6 +42,9 @@ export const config = {
     open: bool(env.ARZIO_SIGNUP_OPEN, true),
     // Max accounts created per IP per hour (basic abuse control)
     perIpPerHour: Number(env.ARZIO_SIGNUP_PER_IP_PER_HOUR || 5),
+    // Close sign-up once this many accounts exist (0 = no limit). A private
+    // server uses 1: the owner signs up first and nobody else can.
+    maxUsers: Number(env.ARZIO_SIGNUP_MAX_USERS || 0),
   },
 
   quotas: {

@@ -38,13 +38,14 @@ function rateLimit(key, max, windowMs) {
 setInterval(() => { const now = Date.now(); for (const [k, b] of buckets) if (now > b.reset) buckets.delete(k); }, 60e3).unref();
 
 // ------------------------------------------------------------ service + auth
+const signupOpen = () => config.signup.open && (!config.signup.maxUsers || db.prepare('SELECT COUNT(*) AS n FROM users').get().n < config.signup.maxUsers);
 api.get('/service', (req, res) => {
-  res.json({ name: config.serviceName, domain: config.primaryDomain, signupOpen: config.signup.open, ai: ai.aiInfo(), billing: billing.billingConfig.enabled,
+  res.json({ name: config.serviceName, domain: config.primaryDomain, signupOpen: signupOpen(), ai: ai.aiInfo(), billing: billing.billingConfig.enabled,
     ...(config.demo ? { demo: { email: `${config.demo.user}@${config.primaryDomain}`, password: config.demo.password } } : {}) });
 });
 
 api.post('/auth/signup', wrap(async (req, res) => {
-  if (!config.signup.open) throw httpError(403, 'Sign-up is closed.');
+  if (!signupOpen()) throw httpError(403, 'Sign-up is closed.');
   rateLimit(`signup:${req.ip}`, config.signup.perIpPerHour, 3600e3);
   const { username, name, password } = req.body || {};
   const user = createUser({ username, name, password, ip: req.ip });

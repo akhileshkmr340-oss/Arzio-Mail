@@ -19,6 +19,7 @@ import { audit } from '../audit.js';
 import { applyTransportRules } from './transport-rules.js';
 import { cleanHtml, inlineImages, textToHtml, mentionedAddresses } from './html.js';
 import { handleInboundCalendar, processReminders } from '../calendar/service.js';
+import { connectedIdentities, sendViaAccount } from './connected.js';
 
 const OUTBOX_DIR = path.join(config.dataDir, 'outbox');
 
@@ -290,7 +291,8 @@ export function sendIdentities(user) {
   const delegated = db.prepare(`SELECT u.id, u.email, u.name, d.permission FROM delegates d JOIN users u ON u.id = d.owner_id
     WHERE d.delegate_id = ? AND d.permission IN ('send_as', 'send_on_behalf', 'full') AND u.is_disabled = 0`).all(user.id)
     .map((r) => ({ address: r.email, name: r.name, mailboxId: r.id, onBehalf: r.permission === 'send_on_behalf' }));
-  return [...own, ...delegated];
+  const taken = new Set([...own, ...delegated].map((i) => i.address));
+  return [...own, ...delegated, ...connectedIdentities(user).filter((i) => !taken.has(i.address))];
 }
 
 /**
@@ -427,6 +429,12 @@ export async function performSend(user, input) {
   compiled.keepBcc = false;
   const raw = await compiled.build();
   if (raw.length > config.quotas.maxMessageBytes) throw httpErr(413, 'Message is too large.');
+  const envelopeTo = [...new Set([...all.map((p) => p.address), ...flow.bcc])];
+
+  // Connected account (e.g. a Hostinger mailbox): send through its own SMTP
+  // server first, so a refused send never leaves a copy in Sent Items
+  let viaAccount = null;
+  if (identity?.connectedId) viaAccount = await sendViaAccount(user.id, fromAddr, raw, envelopeTo);
 
   // 1. Copy into the sending mailbox's Sent Items (threaded with the conversation)
   const sentId = storeMessage(mailboxId, {
@@ -441,15 +449,14 @@ export async function performSend(user, input) {
   audit(user.id, 'mail.sent', { messageId: sentId, from: fromAddr, to: all.map((p) => p.address), subject: mailOptions.subject });
 
   // 2. Local recipients now; 3. remote recipients through the queue (with retries)
-  const envelopeTo = [...new Set([...all.map((p) => p.address), ...flow.bcc])];
   if (flow.matched.length) audit(user.id, 'mailflow.matched', { rules: flow.matched, subject: mailOptions.subject });
-  const { delivered, remote } = await enqueueRemoteOrLocal(user.id, raw, fromAddr, envelopeTo, mailOptions.subject);
+  const { delivered, remote } = viaAccount ? { delivered: [], remote: envelopeTo } : await enqueueRemoteOrLocal(user.id, raw, fromAddr, envelopeTo, mailOptions.subject);
 
   if (input.draftId) {
     const d = getMessage(user.id, input.draftId);
     if (d && d.folder_id === folderByRole(user.id, 'drafts').id) { deleteMessage(user.id, d.id); deleteMessage(user.id, d.id); }
   }
-  return { id: sentId, messageId, deliveredLocally: delivered, sentRemotely: remote, transport: config.outbound.transport };
+  return { id: sentId, messageId, deliveredLocally: delivered, sentRemotely: remote, transport: viaAccount ? 'connected' : config.outbound.transport };
 }
 
 // ---------------------------------------------------------------- workers
@@ -516,5 +523,10 @@ export async function submitRaw(user, raw, envelope) {
   recordContacts(user.id, rcpts.map((address) => ({ address, name: '' })));
   audit(user.id, 'mail.sent', { via: 'smtp', from, to: rcpts, subject: parsed.subject || '' });
   if (flow.matched.length) audit(user.id, 'mailflow.matched', { rules: flow.matched, subject: parsed.subject || '' });
-  return enqueueRemoteOrLocal(user.id, raw, from, [...new Set([...rcpts, ...flow.bcc])], parsed.subject || '');
+  const envelopeTo = [...new Set([...rcpts, ...flow.bcc])];
+  if (sendIdentities(user).find((i) => i.address === from)?.connectedId) {
+    await sendViaAccount(user.id, from, raw, envelopeTo);
+    return { delivered: [], remote: envelopeTo };
+  }
+  return enqueueRemoteOrLocal(user.id, raw, from, envelopeTo, parsed.subject || '');
 }

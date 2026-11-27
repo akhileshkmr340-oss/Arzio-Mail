@@ -33,7 +33,7 @@ function job(userId, source) {
 }
 
 /** Store one raw message unless it is already in the mailbox. Returns true if added. */
-async function importRaw(userId, raw, folderId, { seen = true, flagged = false } = {}) {
+export async function importRaw(userId, raw, folderId, { seen = true, flagged = false } = {}) {
   if (store.mailboxUsage(userId) + raw.length > storageLimit(userId)) throw httpErr(507, 'Mailbox is full.');
   const parsed = await simpleParser(raw);
   if (parsed.messageId && db.prepare('SELECT 1 FROM messages WHERE user_id = ? AND message_id = ?').get(userId, parsed.messageId)) return false;
@@ -104,7 +104,7 @@ export async function startImapImport(user, { host, port = 993, secure = true, u
 }
 
 // Don't let the import feature be used to reach internal services
-async function isPrivateHost(host) {
+export async function isPrivateHost(host) {
   if (process.env.ARZIO_IMPORT_ALLOW_PRIVATE === '1') return false;
   const { lookup } = await import('node:dns/promises');
   try {
